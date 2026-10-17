@@ -1,0 +1,16 @@
+# Never commit log data: exports and zips contain device serials, IP addresses and user names
+*.gz
+*.zip
+*.tar
+*.tgz
+*.log
+*.log.*
+logs/
+xTool_*
+omni_report.html
+*.json
+
+# Python / OS clutter
+__pycache__/
+*.pyc
+.DS_Store

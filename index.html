@@ -1,0 +1,692 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Omni Log Viewer</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/fflate@0.8.2/umd/index.js"></script>
+<script src="omni_parser.js"></script>
+<style>
+:root {
+  --bg: #f6f6f4; --surface: #ffffff; --ink: #1d1d1b; --ink2: #55554f; --muted: #8a8a83;
+  --line: #e4e4df; --grid: #ececE8; --accent: #2f6fdf; --chip: #f0f0ec;
+  --crit: #c62828; --warn: #b26a00; --good: #2e7d32;
+  --k: #2b2b2b;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #151514; --surface: #1f1f1d; --ink: #ecece8; --ink2: #b9b9b2; --muted: #85857e;
+    --line: #34342f; --grid: #2b2b28; --accent: #7aa7ff; --chip: #2a2a27;
+    --crit: #ef6b6b; --warn: #e3a03a; --good: #6cc070; --k: #cfcfcf;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #151514; --surface: #1f1f1d; --ink: #ecece8; --ink2: #b9b9b2; --muted: #85857e;
+  --line: #34342f; --grid: #2b2b28; --accent: #7aa7ff; --chip: #2a2a27;
+  --crit: #ef6b6b; --warn: #e3a03a; --good: #6cc070; --k: #cfcfcf;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+header { padding: 20px 24px 0; max-width: 1400px; margin: 0 auto; }
+h1 { font-size: 20px; margin: 0 0 2px; font-weight: 650; }
+.sub { color: var(--ink2); font-size: 13px; }
+nav { display: flex; gap: 4px; margin-top: 16px; border-bottom: 1px solid var(--line); overflow-x: auto; }
+nav button { background: none; border: 0; padding: 10px 14px; font: inherit; color: var(--ink2); cursor: pointer; border-bottom: 2px solid transparent; white-space: nowrap; }
+nav button.on { color: var(--ink); border-bottom-color: var(--accent); font-weight: 600; }
+main { max-width: 1400px; margin: 0 auto; padding: 20px 24px 60px; }
+section { display: none; } section.on { display: block; }
+.card { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; margin-bottom: 16px; }
+.card h2 { font-size: 15px; margin: 0 0 4px; font-weight: 620; }
+.card .note { color: var(--muted); font-size: 12px; margin: 0 0 12px; }
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-bottom: 16px; }
+.tile { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; }
+.tile .v { font-size: 24px; font-weight: 650; font-variant-numeric: tabular-nums; }
+.tile .l { color: var(--ink2); font-size: 12px; }
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+@media (max-width: 900px) { .grid2 { grid-template-columns: 1fr; } header, main { padding-left: 16px; padding-right: 16px; } }
+.chart { position: relative; height: 320px; }
+.chart.tall { height: 420px; }
+table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { font-size: 12px; color: var(--ink2); font-weight: 600; position: sticky; top: 0; background: var(--surface); cursor: pointer; user-select: none; }
+td.num, th.num { text-align: right; }
+tr.job { cursor: pointer; } tr.job:hover td { background: var(--chip); }
+tr.detail td { background: var(--bg); }
+.scroll { overflow: auto; max-height: 640px; }
+.chip { display: inline-block; padding: 1px 7px; border-radius: 999px; background: var(--chip); font-size: 12px; margin: 1px 2px 1px 0; white-space: nowrap; color: var(--ink); }
+.sw { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 5px; vertical-align: -1px; border: 1px solid rgba(128,128,128,.4); }
+.controls { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; margin-bottom: 12px; }
+.controls label { font-size: 13px; color: var(--ink2); display: inline-flex; align-items: center; gap: 4px; cursor: pointer; }
+input[type=search] { font: inherit; padding: 6px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--ink); min-width: 220px; }
+.bar { display: flex; height: 10px; border-radius: 3px; overflow: hidden; min-width: 80px; gap: 1px; background: var(--chip); }
+.bar span { display: block; height: 100%; }
+.lvl { font-size: 11px; padding: 1px 6px; border-radius: 4px; font-weight: 600; }
+.lvl.W { color: var(--warn); } .lvl.E { color: var(--crit); }
+.muted { color: var(--muted); }
+.tank { display: grid; grid-template-columns: 120px 1fr 110px; gap: 10px; align-items: center; padding: 4px 0; }
+.tank .track { height: 14px; background: var(--chip); border-radius: 4px; overflow: hidden; }
+.tank .fill { height: 100%; border-radius: 4px; }
+.kv { display: grid; grid-template-columns: max-content 1fr; gap: 3px 14px; font-size: 13px; }
+.kv div:nth-child(odd) { color: var(--ink2); }
+details summary { cursor: pointer; color: var(--ink2); }
+code { font-size: 12px; }
+#loader { max-width: 860px; margin: 0 auto; padding: 8px 24px 60px; }
+@media (max-width: 900px) { #loader { padding-left: 16px; padding-right: 16px; } }
+.privacy { display: flex; gap: 10px; align-items: flex-start; background: var(--surface); border: 1px solid var(--line); border-left: 3px solid var(--good); border-radius: 10px; padding: 12px 14px; margin: 16px 0; color: var(--ink2); }
+.privacy b { color: var(--ink); }
+#drop { border: 2px dashed var(--line); border-radius: 12px; background: var(--surface); padding: 32px 20px; text-align: center; transition: border-color .15s, background .15s; }
+#drop.over { border-color: var(--accent); background: var(--chip); }
+#drop .big { font-size: 17px; font-weight: 620; margin-bottom: 6px; }
+.btns { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin-top: 14px; }
+.btn { background: var(--accent); color: #fff; border: 0; border-radius: 8px; padding: 8px 14px; font: inherit; font-weight: 600; cursor: pointer; }
+.btn.alt { background: var(--chip); color: var(--ink); border: 1px solid var(--line); }
+#progress { display: none; margin-top: 16px; }
+#progress .track { height: 8px; background: var(--chip); border-radius: 4px; overflow: hidden; }
+#progress .fill { height: 100%; width: 0; background: var(--accent); transition: width .1s; }
+#progress .label { font-size: 12px; color: var(--muted); margin-top: 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#loadError { display: none; color: var(--crit); margin-top: 12px; }
+#loader ol { padding-left: 20px; color: var(--ink2); } #loader ol li { margin-bottom: 6px; }
+#loader h2 { font-size: 15px; margin: 24px 0 6px; }
+[hidden] { display: none !important; }
+.warnchip { color: var(--warn); }
+#themeBtn { float: right; background: var(--surface); color: var(--ink2); border: 1px solid var(--line); border-radius: 8px; padding: 5px 10px; font: inherit; font-size: 12px; cursor: pointer; }
+</style>
+</head>
+<body>
+<header>
+  <button id="themeBtn" title="Toggle light/dark">Theme</button>
+  <button id="reloadBtn" class="btn alt" style="float:right;margin-right:8px;padding:5px 10px;font-size:12px;font-weight:500" hidden>Load other logs</button>
+  <h1>xTool Omni Log Viewer</h1>
+  <div class="sub" id="subtitle">Print-job, ink and maintenance report for the xTool Omni O1 (Dual-UV) UV printer.</div>
+  <nav id="tabs" hidden>
+    <button data-t="overview" class="on">Overview</button>
+    <button data-t="jobs">Print jobs</button>
+    <button data-t="ink">Ink usage</button>
+    <button data-t="events">Maintenance &amp; events</button>
+    <button data-t="about">About the data</button>
+  </nav>
+</header>
+<div id="loader" hidden>
+  <div class="privacy"><span style="font-size:18px">🔒</span><div><b>Your logs never leave this computer.</b> Everything is read and analysed inside this browser tab; nothing is uploaded to any server. The logs contain your printer's serial number, network address and computer user name, so keep them private.</div></div>
+  <div id="drop">
+    <div class="big">Drop xTool log files or folders here</div>
+    <div class="muted">xTool Studio log exports (<code>.gz</code>), zips of xTool Studio's <code>logs</code> folder (<code>.zip</code>), or the <code>logs</code> folder itself. Add as many as you like; overlapping exports are merged.</div>
+    <div class="btns">
+      <button class="btn" id="pickFiles">Choose files…</button>
+      <button class="btn alt" id="pickFolder">Choose a folder…</button>
+    </div>
+    <input type="file" id="fileInput" multiple hidden>
+    <input type="file" id="folderInput" webkitdirectory multiple hidden>
+    <div id="progress"><div class="track"><div class="fill"></div></div><div class="label"></div></div>
+    <div id="loadError"></div>
+  </div>
+  <div id="queued" class="muted" style="font-size:13px;margin-top:10px"></div>
+
+  <h2>What to load</h2>
+  <ol>
+    <li><b>The printer's logs.</b> Export them from xTool Studio while the Omni is connected (the device log export). You get one file named like <code>xTool_dt002_log.gz</code>. It holds the printer's own journal (prints, cleans, ink levels) plus the last few days of xTool Studio's logs.</li>
+    <li><b>xTool Studio's <code>logs</code> folder</b> from each computer you print from, for job names, layer stacks and per-layer inks going further back. Use <b>Choose a folder…</b> and pick the whole <code>logs</code> folder, or zip the whole folder and drop the zip. Keep its <code>algo-server</code> sub-folders: they hold Studio's slicer log, the only place that says which layers are varnish rather than white.
+      <div class="kv" style="margin-top:6px">
+        <div>Mac</div><div><code>~/Library/Application Support/xTool Studio/logs</code> (in Finder: Go → Go to Folder…)</div>
+        <div>Windows</div><div><code>%APPDATA%\xTool Studio\logs</code> (paste into the Explorer address bar; location not yet confirmed on Windows)</div>
+      </div>
+    </li>
+    <li>Older exports are worth keeping: the printer only keeps recent history, and loading several exports together recovers everything that has since rotated out.</li>
+  </ol>
+  <p class="muted" style="font-size:12px">Not affiliated with or endorsed by xTool. Works offline once this page has loaded; it fetches its chart and unzip libraries from public CDNs.</p>
+</div>
+
+<main id="report" hidden>
+<section id="overview" class="on">
+  <div class="tiles" id="tiles"></div>
+  <div class="grid2">
+    <div class="card"><h2>Ink remaining</h2><p class="note">Current cartridge level (latest snapshot from the printer).</p><div id="tankLevels"></div></div>
+    <div class="card"><h2>Where the ink went</h2><p class="note">Total ml consumed across all tanks, by cause.</p><div class="chart"><canvas id="causeChart"></canvas></div></div>
+  </div>
+  <div class="grid2">
+    <div class="card"><h2>Lifetime counters</h2><p class="note">Reported by the printer (seconds unless noted).</p><div class="kv" id="counters"></div></div>
+    <div class="card"><h2>Recent activity</h2><p class="note">Last 12 non-routine events.</p><div id="recent"></div></div>
+  </div>
+</section>
+
+<section id="jobs">
+  <div class="card">
+    <h2>Ink per print job</h2>
+    <p class="note">Measured ml drop per tank while printing (includes the periodic in-print flash spits; the standard head clean some jobs start with is counted separately).</p>
+    <div class="chart tall"><canvas id="jobInkChart"></canvas></div>
+  </div>
+  <div class="grid2">
+    <div class="card"><h2>Ink vs print area</h2><p class="note">Total ml per job against printed area (cm²). Bubble size = layer count.</p><div class="chart"><canvas id="areaChart"></canvas></div></div>
+    <div class="card"><h2>Layer configurations</h2><p class="note">Layer stacks used, counted across jobs.</p><div class="chart"><canvas id="layerChart"></canvas></div></div>
+  </div>
+  <div class="card">
+    <div class="controls">
+      <h2 style="margin:0 12px 0 0">All print jobs</h2>
+      <label><input type="checkbox" id="showTests"> Show setup / test prints</label>
+      <span class="muted" style="font-size:12px">Click a row for details.</span>
+    </div>
+    <div class="scroll"><table id="jobTable"></table></div>
+  </div>
+</section>
+
+<section id="ink">
+  <div class="card">
+    <div class="controls"><h2 style="margin:0 12px 0 0">Ink level over time</h2><span id="tankToggles"></span></div>
+    <p class="note">Remaining ml per cartridge. Shaded bands are print jobs.</p>
+    <div class="chart tall"><canvas id="levelChart"></canvas></div>
+  </div>
+  <div class="controls"><label><input type="checkbox" id="inclSetup"> Include one-time setup ink (initial priming &amp; test prints)</label></div>
+  <div class="grid2">
+    <div class="card"><h2>Consumption by tank and cause</h2><p class="note">ml used by printing vs maintenance.</p><div class="chart"><canvas id="tankCauseChart"></canvas></div></div>
+    <div class="card"><h2>Daily consumption</h2><p class="note">ml per day (your local time), all tanks, by cause.</p><div class="chart"><canvas id="dailyChart"></canvas></div></div>
+  </div>
+  <div class="card">
+    <h2>Planned vs measured ink</h2>
+    <p class="note">xTool Studio's pre-print estimate (computeInkVolume, picolitres → ml) vs the printer's measured drop. Only jobs sent from the computer whose logs are included.</p>
+    <div class="scroll"><table id="planTable"></table></div>
+  </div>
+  <div class="card"><h2>Cartridges</h2><p class="note">From the printer's inkConsumption.json. The first serial in each slot is the installed cartridge.</p><div class="scroll"><table id="cartTable"></table></div></div>
+</section>
+
+<section id="events">
+  <div class="card">
+    <h2>Timeline</h2>
+    <p class="note">Each row is an event type; bars show duration where the printer logged start and finish.</p>
+    <div class="chart tall"><canvas id="timelineChart"></canvas></div>
+  </div>
+  <div class="grid2">
+    <div class="card"><h2>Maintenance summary</h2><div id="maintSummary"></div></div>
+    <div class="card"><h2>Power &amp; sleep</h2><div id="powerSummary"></div></div>
+  </div>
+  <div class="card">
+    <div class="controls" id="evFilters"></div>
+    <div class="scroll"><table id="evTable"></table></div>
+  </div>
+</section>
+
+<section id="about">
+  <div class="card">
+    <h2>Data sources</h2>
+    <div class="scroll" style="max-height:300px;margin-bottom:8px"><table id="sourceTable"></table></div>
+    <p class="note" id="dupNote"></p>
+    <div class="kv" id="aboutKv"></div>
+    <div id="slicerCoverage" style="margin-top:12px"></div>
+    <details style="margin-top:12px"><summary>Files found in the bundle</summary><pre id="fileList" style="font-size:12px;white-space:pre-wrap"></pre></details>
+  </div>
+  <div class="card">
+    <h2>How things are derived</h2>
+    <ul style="margin:0;padding-left:18px;color:var(--ink2)">
+      <li><b>Events</b> come from the printer's journal <code>mnt/config/record/record.log</code>: prints, cleans, white-ink stir/circulation, sleep / low-power, boots, calibration, alarms.</li>
+      <li><b>Ink levels</b> come from <code>ink_tank_status</code> reports in the printer's app-controller logs, written after every clean and print. Usage between two snapshots is assigned to a standalone clean in that window if there is one, otherwise to the job running, otherwise to the latest maintenance event.</li>
+      <li><b>Job names, passes, time estimates</b> come from task-history replies in the xTool Studio logs.</li>
+      <li><b>Layer stacks, size, thickness, DPI and planned ink</b> come from the xTool Studio slicer and print parameters logged just before each job was sent. Jobs sent from a different computer (or before these desktop logs start) have no layer detail.</li>
+      <li><b>Per-layer inks</b> (white, flexible white, varnish or colour) come from <code>[GenPd]</code> lines in xTool Studio's slicer log <code>logs/&lt;date&gt;/algo-server/server.log</code>, matched to jobs by task ID. That file lives under the day Studio was started and keeps growing on later days. Without it the layer stack falls back to the slicer settings, which call varnish layers "white"; those jobs are marked <span class="warnchip">⚠</span>.</li>
+      <li><b>Tank names</b> are the ones the printer reports for each cartridge. Head 1 holds Cyan, Magenta, Yellow, Black, Varnish and White; head 2 (Dual-UV) holds Fluorescent Yellow, Fluorescent Red, Flexible White and Rigid White. Studio's ink channels map as C→Cyan, M→Magenta, Y→Yellow, K→Black, V→Varnish, W→White, HW→Rigid White and SW→Flexible White (HW checked against measured drops).</li>
+      <li><b>Clock</b>: printer timestamps are converted using the detected offset shown above, and everything is shown in this browser's local time.</li>
+    </ul>
+  </div>
+</section>
+</main>
+
+<script>
+let DATA = /*__DATA__*/null;
+
+// ---------------------------------------------------------------- helpers
+const $ = s => document.querySelector(s);
+const css = v => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+const fmtT = t => t == null ? '—' : new Date(t).toLocaleString([], {month:'short', day:'numeric', hour:'numeric', minute:'2-digit'});
+const fmtD = s => { if (s == null) return '—'; s = Math.round(s); const h = Math.floor(s/3600), m = Math.floor(s%3600/60), x = s%60; return h ? `${h}h ${m}m` : m ? `${m}m ${x}s` : `${x}s`; };
+const ml = v => v == null ? '—' : v < 0.005 ? '0' : v < 1 ? v.toFixed(2) : v.toFixed(1);
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+const TANK_COLORS = { UC:'#0098d4', UM:'#d4247a', UY:'#e3b800', UK:'var(--k)', UV:'#8b78d0', UW:'#a9aeb6',
+                      UH:'#b5c900', UR:'#ff4f6e', US:'#3e9a8c', UD:'#6b7f99' };
+const TANK_LABEL = { UC:'Cyan', UM:'Magenta', UY:'Yellow', UK:'Black', UV:'Varnish', UW:'White', UH:'Fluorescent Yellow', UR:'Fluorescent Red', US:'Flexible White', UD:'Rigid White' };
+const CHANNEL_TANK = { C:'UC', M:'UM', Y:'UY', K:'UK', V:'UV', W:'UW', HW:'UD', SW:'US', VY:'UH', VR:'UR' };
+const CAT = {
+  print:{label:'Printing', color:'#2f6fdf'}, cleaning:{label:'Head cleaning', color:'#d4247a'},
+  'white-ink':{label:'White ink stir / circulate', color:'#8a8f98'}, power:{label:'Power / sleep', color:'#3e9a8c'},
+  calibration:{label:'Calibration / measure / scan', color:'#e07a2e'}, alarm:{label:'Alarms', color:'#c62828'},
+  config:{label:'Config changes', color:'#b5a642'}, other:{label:'Other', color:'#999'}
+};
+const CAUSE_LABEL = { 'print': 'Printing', 'test print': 'Setup / test prints', 'clean: ink initial': 'Initial ink priming (setup)', 'clean: moist initial': 'Initial moisturizer priming', 'clean: standard': 'Standard head clean', 'clean: flash': 'Flash (spit) clean', 'white maintenance': 'White ink maintenance', 'other': 'Other / unattributed' };
+const causeLabel = c => CAUSE_LABEL[c] || c.replace(/^clean: /, 'Clean: ');
+const resolve = c => c.startsWith('var(') ? css(c.slice(4, -1)) : c;
+let tankKeys, jobs, realJobs;
+const tcode = k => DATA.tanks[k]?.code || k;
+const tcolor = k => resolve(TANK_COLORS[tcode(k)] || '#999');
+const tlabel = k => TANK_LABEL[tcode(k)] || tcode(k);
+const sum = a => a.reduce((x, y) => x + y, 0);
+const jobTotal = j => sum(Object.values(j.inkUsed || {}));
+const jobClean = j => sum(Object.values(j.inkClean || {}));
+
+function layerStack(j) {
+  const out = [];
+  for (const e of j.elements || []) for (const l of e.layers || []) out.push(l);
+  return out;
+}
+const INK_LAYER = { HW: 'White', W: 'White', SW: 'Flexible white', V: 'Varnish', C: 'Color', VY: 'Fluorescent yellow', VR: 'Fluorescent red' };
+const MODE_LAYER = { white: 'White', global_color: 'Color', periodic_color: 'Color (relief)' };
+// Ordered runs of layer types for one element, e.g. [['White', 1], ['Color', 1]]
+function elementRuns(e) {
+  const seq = e.inks ? e.inks.map(i => INK_LAYER[i] || i)
+    : (e.layers || []).flatMap(l => Array(l.count || 1).fill(MODE_LAYER[l.mode] || l.mode));
+  const runs = [];
+  for (const s of seq) { if (runs.length && runs[runs.length - 1][0] === s) runs[runs.length - 1][1]++; else runs.push([s, 1]); }
+  return runs;
+}
+function layerSummary(j) {
+  const t = {};
+  for (const e of j.elements || []) for (const [k, n] of elementRuns(e)) t[k] = (t[k] || 0) + n;
+  return t;
+}
+// where each job's per-layer inks came from: 'slicer' (all elements), 'partial', 'settings' or null (no layer detail)
+function inkCoverage(j) {
+  const els = j.elements || [];
+  if (!els.length) return null;
+  const n = els.filter(e => e.inkSource === 'slicer').length;
+  return n === els.length ? 'slicer' : n ? 'partial' : 'settings';
+}
+const NO_SLICER = 'No per-layer inks from xTool Studio\'s slicer log (algo-server/server.log) for this job: layers shown from the slicer settings, where varnish counts as white.';
+const LAYER_COLOR = { 'White': '#a9aeb6', 'Flexible white': '#3e9a8c', 'Varnish': '#8b78d0', 'Color': '#2f6fdf', 'Color (relief)': '#2f6fdf' };
+const chips = obj => Object.entries(obj).map(([k, v]) => `<span class="chip">${LAYER_COLOR[k] ? `<span class="sw" style="background:${LAYER_COLOR[k]}"></span>` : ''}${esc(k)} × ${v}</span>`).join('');
+function stackText(e) {
+  return elementRuns(e).map(([k, n]) => `${k} ×${n}`).join(' → ');
+}
+
+// Chart.js defaults
+function chartDefaults() {
+  Chart.defaults.color = css('--ink2');
+  Chart.defaults.borderColor = css('--grid');
+  Chart.defaults.font.family = getComputedStyle(document.body).fontFamily;
+  Chart.defaults.font.size = 12;
+  Chart.defaults.plugins.legend.labels.boxWidth = 10;
+  Chart.defaults.plugins.legend.labels.boxHeight = 10;
+  Chart.defaults.plugins.tooltip.backgroundColor = css('--surface');
+  Chart.defaults.plugins.tooltip.titleColor = css('--ink');
+  Chart.defaults.plugins.tooltip.bodyColor = css('--ink2');
+  Chart.defaults.plugins.tooltip.borderColor = css('--line');
+  Chart.defaults.plugins.tooltip.borderWidth = 1;
+  Chart.defaults.elements.bar.borderRadius = 3;
+}
+const charts = [];
+const mk = (id, cfg) => { const c = new Chart($(id), cfg); charts.push(c); return c; };
+
+// ---------------------------------------------------------------- header
+function header() {
+  const ts = DATA.events.filter(e => e.t).map(e => e.t);
+  const lo = Math.min(...ts), hi = Math.max(...ts);
+  $('#subtitle').textContent = `${DATA.sources.length === 1 ? DATA.sources[0] : DATA.sources.length + ' log sources'} · ${fmtT(lo)} – ${fmtT(hi)}` + (DATA.firmware ? ` · firmware ${DATA.firmware}` : '');
+}
+
+// ---------------------------------------------------------------- overview
+function overview() {
+  const cleans = DATA.events.filter(e => e.cat === 'cleaning' && e.kind === 'clean start');
+  const printTime = sum(realJobs.map(j => j.dur || 0));
+  const byCause = {};
+  for (const u of DATA.usage) { const c = u.src.startsWith('clean') ? u.src : u.src; byCause[c] = (byCause[c] || 0) + u.ml; }
+  const printMl = byCause['print'] || 0;
+  const totalMl = sum(Object.values(byCause));
+  const alarms = DATA.events.filter(e => e.cat === 'alarm').length;
+  const wakes = DATA.events.filter(e => e.kind.startsWith('wakeup')).length;
+  const tiles = [
+    [realJobs.length, 'Print jobs'], [fmtD(printTime), 'Time printing'],
+    [ml(printMl) + ' ml', 'Ink used by prints'], [ml(totalMl - printMl) + ' ml', 'Ink used by maintenance'],
+    [cleans.length, `Head cleans (${cleans.filter(c => c.d.inPrint).length} in-print)`],
+    [DATA.events.filter(e => e.kind === 'boot').length, 'Boots (power cycles)'],
+    [wakes, 'Wake-ups from sleep'], [alarms, 'Alarms'],
+  ];
+  $('#tiles').innerHTML = tiles.map(([v, l]) => `<div class="tile"><div class="v">${esc(v)}</div><div class="l">${esc(l)}</div></div>`).join('');
+
+  $('#tankLevels').innerHTML = tankKeys.map(k => {
+    const s = DATA.inkSeries[k], last = s[s.length - 1], full = last[2], pct = Math.max(0, Math.min(100, last[1] / full * 100));
+    return `<div class="tank"><div><span class="sw" style="background:${tcolor(k)}"></span>${esc(tlabel(k))}</div>
+      <div class="track"><div class="fill" style="width:${pct}%;background:${tcolor(k)}"></div></div>
+      <div class="num muted" style="text-align:right">${last[1].toFixed(1)} / ${full} ml</div></div>`;
+  }).join('') + (DATA.moistTanks.length ? `<div class="muted" style="font-size:12px;margin-top:8px">Moisturizing fluid: ${DATA.moistTanks.map(m => `${m.cartridges?.[0]?.remainMl?.toFixed(0)} ml`).join(', ')}</div>` : '');
+
+  const causes = Object.entries(byCause).sort((a, b) => b[1] - a[1]);
+  const causeColor = c => c === 'print' ? CAT.print.color : c === 'test print' ? '#7aa7ff' : c.startsWith('clean') ? (c.includes('initial') ? '#a35a9a' : CAT.cleaning.color) : c === 'white maintenance' ? CAT['white-ink'].color : '#999';
+  mk('#causeChart', { type: 'bar', data: { labels: causes.map(c => causeLabel(c[0])), datasets: [{ data: causes.map(c => c[1]), backgroundColor: causes.map(c => causeColor(c[0])), maxBarThickness: 28 }] },
+    options: { indexAxis: 'y', maintainAspectRatio: false, plugins: { legend: { display: false }, tooltip: { callbacks: { label: c => ` ${ml(c.raw)} ml` } } }, scales: { x: { title: { display: true, text: 'ml' } }, y: { grid: { display: false } } } } });
+
+  const c = DATA.counters || {};
+  const labels = { processCount: ['Jobs processed', v => v], processTotalTime: ['Total processing time', fmtD], uvLampRunTime: ['UV lamp run time', fmtD],
+    airPurifierRunTime: ['Air purifier run time', fmtD], opticalPathRunTime: ['Optical path run time', fmtD], standbyTime: ['Standby time', fmtD],
+    inkExtractionCount: ['Ink extraction (purge) count', v => v], scrapingCount: ['Wiper scraping count', v => v] };
+  $('#counters').innerHTML = Object.entries(c).map(([k, v]) => `<div>${esc(labels[k]?.[0] || k)}</div><div>${esc(labels[k] ? labels[k][1](v) : v)}</div>`).join('') || '<div class="muted">No counters found</div>';
+
+  const recent = DATA.events.filter(e => e.t && !['config', 'calibration'].includes(e.cat) && !e.kind.includes('finish') && !(e.cat === 'cleaning' && e.d.inPrint)).slice(-12).reverse();
+  $('#recent').innerHTML = `<table>${recent.map(e => `<tr><td class="muted" style="white-space:nowrap">${fmtT(e.t)}</td><td><span class="sw" style="background:${CAT[e.cat].color}"></span>${esc(describe(e))}</td></tr>`).join('')}</table>`;
+}
+
+// ---------------------------------------------------------------- jobs
+function jobsTab() {
+  const shown = realJobs;
+  const labels = shown.map(j => `${fmtT(j.start)} · ${j.name || j.taskId}`);
+  mk('#jobInkChart', { type: 'bar',
+    data: { labels, datasets: tankKeys.map(k => ({ label: tlabel(k), data: shown.map(j => j.inkUsed?.[k] || 0), backgroundColor: tcolor(k), borderColor: css('--surface'), borderWidth: { top: 1 }, maxBarThickness: 40 })) },
+    options: { maintainAspectRatio: false, plugins: { tooltip: { mode: 'index', filter: i => i.raw > 0.004, callbacks: { label: c => ` ${c.dataset.label}: ${ml(c.raw)} ml`, footer: it => `Total ${ml(sum(it.map(i => i.raw)))} ml` } } },
+      scales: { x: { stacked: true, ticks: { maxRotation: 60, autoSkip: false, callback(v) { const s = this.getLabelForValue(v); return s.length > 34 ? s.slice(0, 33) + '…' : s; } }, grid: { display: false } }, y: { stacked: true, title: { display: true, text: 'ml' } } } } });
+
+  const pts = shown.filter(j => j.size).map(j => ({ x: j.size.w * j.size.h / 100, y: jobTotal(j), r: 4 + Math.min(16, sum(Object.values(layerSummary(j))) * 1.2), j }));
+  mk('#areaChart', { type: 'bubble', data: { datasets: [{ data: pts, backgroundColor: CAT.print.color + '99', borderColor: css('--surface'), borderWidth: 2 }] },
+    options: { maintainAspectRatio: false, plugins: { legend: { display: false }, tooltip: { callbacks: { label: c => { const j = c.raw.j; return [`${j.name || j.taskId}`, `${j.size.w.toFixed(0)} × ${j.size.h.toFixed(0)} mm, ${ml(c.raw.y)} ml`, Object.entries(layerSummary(j)).map(([k, v]) => `${k} ×${v}`).join(', ')]; } } } },
+      scales: { x: { title: { display: true, text: 'Print area (cm²)' }, beginAtZero: true }, y: { title: { display: true, text: 'Ink used (ml)' }, beginAtZero: true } } } });
+
+  const stacks = {};
+  for (const j of shown) for (const e of j.elements || []) { const s = stackText(e); if (s) stacks[s] = (stacks[s] || 0) + 1; }
+  const st = Object.entries(stacks).sort((a, b) => b[1] - a[1]);
+  mk('#layerChart', { type: 'bar', data: { labels: st.map(s => s[0]), datasets: [{ data: st.map(s => s[1]), backgroundColor: '#8b78d0', maxBarThickness: 24 }] },
+    options: { indexAxis: 'y', maintainAspectRatio: false, plugins: { legend: { display: false }, tooltip: { callbacks: { label: c => ` ${c.raw} element(s)` } } }, scales: { x: { ticks: { precision: 0 }, title: { display: true, text: 'Elements printed' } }, y: { grid: { display: false } } } } });
+
+  renderJobTable();
+  $('#showTests').onchange = renderJobTable;
+}
+
+let jobSort = { k: 'start', dir: -1 };
+function renderJobTable() {
+  const list = ($('#showTests').checked ? jobs : realJobs).slice();
+  const cols = [
+    ['start', 'Started', j => fmtT(j.start), j => j.start],
+    ['name', 'Name', j => esc(j.name || (j.isTest ? 'Setup / test print' : j.taskId)), j => j.name || ''],
+    ['dur', 'Duration', j => fmtD(j.dur), j => j.dur, 1],
+    ['passes', 'Passes', j => j.passes ?? '—', j => j.passes, 1],
+    ['size', 'Size (mm)', j => j.size ? `${j.size.w.toFixed(1)} × ${j.size.h.toFixed(1)}` : '<span class="muted">—</span>', j => j.size ? j.size.w * j.size.h : -1, 1],
+    ['layers', 'Layers', j => (chips(layerSummary(j)) || '<span class="muted">—</span>') + (['partial', 'settings'].includes(inkCoverage(j)) ? ` <span class="warnchip" title="${esc(NO_SLICER)}">⚠</span>` : ''), j => sum(Object.values(layerSummary(j)))],
+    ['thick', 'Thickness', j => { const t = (j.elements || []).map(e => e.printThickness).filter(x => x); return t.length ? Math.max(...t) + ' mm' : '—'; }, j => Math.max(0, ...(j.elements || []).map(e => e.printThickness || 0)), 1],
+    ['ink', 'Ink (ml)', j => `<div style="display:flex;gap:8px;align-items:center;justify-content:flex-end"><span>${ml(jobTotal(j))}</span>${inkBar(j)}</div>`, jobTotal, 1],
+    ['cleans', 'Cleans', j => j.cleans.length ? `${j.cleans.length}${jobClean(j) > 0.004 ? ` <span class="muted">(${ml(jobClean(j))} ml)</span>` : ''}` : '', j => j.cleans.length, 1],
+  ];
+  const col = cols.find(c => c[0] === jobSort.k);
+  list.sort((a, b) => { const x = col[3](a), y = col[3](b); return (x > y ? 1 : x < y ? -1 : 0) * jobSort.dir; });
+  const t = $('#jobTable');
+  t.innerHTML = `<thead><tr>${cols.map(c => `<th data-k="${c[0]}" class="${c[4] ? 'num' : ''}">${c[1]}${jobSort.k === c[0] ? (jobSort.dir > 0 ? ' ▲' : ' ▼') : ''}</th>`).join('')}</tr></thead><tbody>` +
+    list.map((j, i) => `<tr class="job" data-i="${jobs.indexOf(j)}">${cols.map(c => `<td class="${c[4] ? 'num' : ''}">${c[2](j)}</td>`).join('')}</tr>`).join('') + '</tbody>';
+  t.querySelectorAll('th').forEach(th => th.onclick = () => { jobSort = { k: th.dataset.k, dir: jobSort.k === th.dataset.k ? -jobSort.dir : -1 }; renderJobTable(); });
+  t.querySelectorAll('tr.job').forEach(tr => tr.onclick = () => {
+    const nx = tr.nextElementSibling;
+    if (nx && nx.classList.contains('detail')) { nx.remove(); return; }
+    const d = document.createElement('tr'); d.className = 'detail';
+    d.innerHTML = `<td colspan="${cols.length}">${jobDetail(jobs[+tr.dataset.i])}</td>`;
+    tr.after(d);
+  });
+}
+function inkBar(j) {
+  const tot = jobTotal(j); if (!tot) return '<div class="bar"></div>';
+  return `<div class="bar" title="${tankKeys.filter(k => j.inkUsed[k] > 0.004).map(k => `${tlabel(k)} ${ml(j.inkUsed[k])}`).join(', ')}">${tankKeys.map(k => j.inkUsed?.[k] > 0.004 ? `<span style="width:${j.inkUsed[k] / tot * 100}%;background:${tcolor(k)}"></span>` : '').join('')}</div>`;
+}
+function jobDetail(j) {
+  const s = j.settings || {};
+  const el = (j.elements || []).map((e, i) => `<tr><td>${i + 1}</td><td>${esc(e.processingType || '—')}</td><td>${esc(e.inkMode || '—')}</td><td>${esc(stackText(e))}${e.inkSource === 'slicer' ? '' : ` <span class="warnchip" title="${esc(NO_SLICER)}">⚠ ${e.inkSource === 'ink mode' ? 'from ink mode' : 'settings only'}</span>`}</td>
+    <td class="num">${e.pos ? `${e.pos.w.toFixed(1)} × ${e.pos.h.toFixed(1)}` : '—'}</td><td class="num">${e.printThickness ?? '—'}</td><td class="num">${e.layerThicknessMm ?? '—'}</td><td>${esc(e.whiteInkType || '')} ${esc(e.varnishType || '')}</td></tr>`).join('');
+  const ink = tankKeys.filter(k => j.inkUsed?.[k] > 0.004).map(k => `<span class="chip"><span class="sw" style="background:${tcolor(k)}"></span>${esc(tlabel(k))} ${ml(j.inkUsed[k])} ml</span>`).join('');
+  const plan = Object.entries(j.inkPlanMl || {}).map(([c, v]) => `<span class="chip">${c} ${ml(v)} ml</span>`).join('');
+  return `<div class="kv" style="margin-bottom:10px">
+    <div>Task ID</div><div><code>${esc(j.taskId)}</code></div>
+    <div>Start → finish</div><div>${fmtT(j.start)} → ${fmtT(j.end)} (${fmtD(j.dur)}${j.estimate ? `, estimate ${fmtD(j.estimate)}` : ''})</div>
+    ${j.mode ? `<div>Mode</div><div>${esc(j.mode)}</div>` : ''}
+    ${s.dpi ? `<div>Resolution</div><div>${esc(s.dpi)} dpi${s.highSpeedPrint === 'true' ? ', high speed' : ''}</div>` : ''}
+    ${s.uvLightPower ? `<div>UV power / speed</div><div>${esc(s.uvLightPower)} / ${esc(s.speed)}</div>` : ''}
+    ${s.inkSavingMode ? `<div>Ink saving / halftone</div><div>${esc(s.inkSavingMode)} / ${esc(s.halfToningType || '')}</div>` : ''}
+    <div>Measured ink (printing)</div><div>${ink || '<span class="muted">none recorded</span>'}</div>
+    ${jobClean(j) > 0.004 ? `<div>Head clean during job</div><div>${tankKeys.filter(k => j.inkClean[k] > 0.004).map(k => `<span class="chip"><span class="sw" style="background:${tcolor(k)}"></span>${esc(tlabel(k))} ${ml(j.inkClean[k])} ml</span>`).join('')}</div>` : ''}
+    ${plan ? `<div>Studio estimate</div><div>${plan}</div>` : ''}
+    <div>In-print events</div><div>${j.cleans.length ? chips(j.cleans.reduce((a, c) => (a['clean: ' + c] = (a['clean: ' + c] || 0) + 1, a), {})) : 'no cleans'}${j.pauses ? ` <span class="chip">paused × ${j.pauses}</span>` : ''}${j.alarms.length ? ` <span class="chip" style="color:var(--crit)">alarms: ${esc(j.alarms.join(', '))}</span>` : ''}</div>
+  </div>` + (el ? `<table><thead><tr><th>#</th><th>Type</th><th>Ink mode</th><th>Layer stack</th><th class="num">Size (mm)</th><th class="num">Thickness</th><th class="num">Layer mm</th><th>White / varnish type</th></tr></thead><tbody>${el}</tbody></table>
+    <div class="muted" style="font-size:12px;margin-top:6px">Layer inks come from xTool Studio's slicer log where available (otherwise from the slicer settings, which can't tell white from varnish; marked ⚠). Element types and sizes after the first may be missing because Studio truncates that log line.</div>` : '<div class="muted">No layer detail for this job (it was sent from another computer or before the desktop logs start).</div>');
+}
+
+// ---------------------------------------------------------------- ink
+function inkTab() {
+  const bands = realJobs.filter(j => j.start && j.end);
+  const bandPlugin = { id: 'bands', beforeDatasetsDraw(c) { const { ctx, chartArea: a, scales: { x } } = c; ctx.save(); ctx.fillStyle = css('--chip');
+    for (const j of bands) { const x0 = x.getPixelForValue(j.start), x1 = x.getPixelForValue(j.end); if (x1 < a.left || x0 > a.right) continue; ctx.fillRect(Math.max(a.left, x0), a.top, Math.max(2, Math.min(a.right, x1) - Math.max(a.left, x0)), a.bottom - a.top); } ctx.restore(); } };
+  const lc = mk('#levelChart', { type: 'line', plugins: [bandPlugin],
+    data: { datasets: tankKeys.map(k => ({ label: tlabel(k), data: DATA.inkSeries[k].map(p => ({ x: p[0], y: p[1] })), borderColor: tcolor(k), backgroundColor: tcolor(k), stepped: 'after', pointRadius: 0, pointHitRadius: 6, borderWidth: 2 })) },
+    options: { maintainAspectRatio: false, interaction: { mode: 'nearest', intersect: false, axis: 'x' }, plugins: { legend: { display: false }, tooltip: { callbacks: { title: it => fmtT(it[0].parsed.x), label: c => ` ${c.dataset.label}: ${c.parsed.y.toFixed(2)} ml` } } },
+      scales: { x: { type: 'time', time: { tooltipFormat: 'PPp' } }, y: { title: { display: true, text: 'ml remaining' } } } } });
+  $('#tankToggles').innerHTML = tankKeys.map((k, i) => `<label><input type="checkbox" data-i="${i}" checked><span class="sw" style="background:${tcolor(k)}"></span>${esc(tlabel(k))}</label>`).join(' ');
+  $('#tankToggles').querySelectorAll('input').forEach(cb => cb.onchange = () => { lc.setDatasetVisibility(+cb.dataset.i, cb.checked); lc.update(); });
+
+  const USAGE = $('#inclSetup').checked ? DATA.usage : DATA.usage.filter(u => !/initial|test print/.test(u.src));
+  $('#inclSetup').onchange = renderAll;
+  const causes = [...new Set(USAGE.map(u => u.src))];
+  const causeColor = c => c === 'print' ? CAT.print.color : c === 'test print' ? '#7aa7ff' : c.includes('initial') ? '#a35a9a' : c.startsWith('clean') ? CAT.cleaning.color : c === 'white maintenance' ? CAT['white-ink'].color : '#999';
+  const agg = (keyFn, keys) => causes.map(c => ({ label: causeLabel(c), backgroundColor: causeColor(c), borderColor: css('--surface'), borderWidth: { top: 1 }, maxBarThickness: 36,
+    data: keys.map(k => sum(USAGE.filter(u => u.src === c && keyFn(u) === k).map(u => u.ml))) }));
+  const stackedOpts = (xt) => ({ maintainAspectRatio: false, plugins: { tooltip: { mode: 'index', filter: i => i.raw > 0.004, callbacks: { label: c => ` ${c.dataset.label}: ${ml(c.raw)} ml` } } }, scales: { x: { stacked: true, grid: { display: false } }, y: { stacked: true, title: { display: true, text: 'ml' } } } });
+  mk('#tankCauseChart', { type: 'bar', data: { labels: tankKeys.map(tlabel), datasets: agg(u => u.tank, tankKeys) }, options: stackedOpts() });
+  const day = t => { const d = new Date(t); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
+  const days = [...new Set(USAGE.map(u => day(u.t)))].sort();
+  mk('#dailyChart', { type: 'bar', data: { labels: days, datasets: agg(u => day(u.t), days) }, options: stackedOpts() });
+
+  const pj = realJobs.filter(j => Object.keys(j.inkPlanMl || {}).length);
+  const chans = [...new Set(pj.flatMap(j => Object.keys(j.inkPlanMl)))];
+  $('#planTable').innerHTML = pj.length ? `<thead><tr><th>Job</th>${chans.map(c => `<th class="num">${c} est.</th><th class="num">${c} meas.</th>`).join('')}</tr></thead><tbody>` +
+    pj.map(j => `<tr><td>${fmtT(j.start)} · ${esc(j.name || j.taskId)}</td>${chans.map(c => { const k = tankKeys.find(k => tcode(k) === CHANNEL_TANK[c]); return `<td class="num">${ml(j.inkPlanMl[c])}</td><td class="num muted">${k ? ml(j.inkUsed?.[k]) : '?'}</td>`; }).join('')}</tr>`).join('') + '</tbody>'
+    : '<tr><td class="muted">No jobs with Studio estimates.</td></tr>';
+
+  const rows = [];
+  for (const k of Object.keys(DATA.tanks).sort()) for (const [i, c] of (DATA.tanks[k].cartridges || []).entries())
+    rows.push(`<tr><td><span class="sw" style="background:${tcolor(k)}"></span>${esc(tlabel(k))}</td><td>${i === 0 ? 'installed' : 'history ' + i}</td><td><code>${esc(c.serial)}</code></td><td class="num">${c.remainMl.toFixed(2)} ml</td></tr>`);
+  $('#cartTable').innerHTML = `<thead><tr><th>Tank</th><th></th><th>Serial</th><th class="num">Remaining</th></tr></thead><tbody>${rows.join('')}</tbody>`;
+}
+
+// ---------------------------------------------------------------- events
+function describe(e) {
+  const d = e.d || {};
+  switch (true) {
+    case e.kind === 'clean start': return `Head clean: ${d.action || '?'} (head ${d.head || '?'})${d.inPrint ? ' during print' : ''}${e.dur ? ' · ' + fmtD(e.dur) : ''}`;
+    case e.kind === 'white maintain start': return `White ink ${d.kind === 'stire' ? 'stir' : d.kind === 'cycle' ? 'circulation' : d.kind}${e.dur ? ' · ' + fmtD(e.dur) : ''}`;
+    case e.kind === 'low power maintain': return `White ink ${d.action === 'whiteStire' ? 'stir' : d.action === 'whiteCycle' ? 'circulation' : d.action} (while in low power)`;
+    case e.kind === 'print start': return `Print started${d.taskId && d.taskId !== 'taskNoQueue' ? ' · ' + (jobs.find(j => j.taskId === d.taskId)?.name || d.taskId) : ' (setup/test)'}`;
+    case e.kind === 'enter low power': return `Entered low power (wake planned in ${fmtD(+(d.plan || '0').replace('s', ''))})`;
+    case e.kind.startsWith('wakeup'): return `Woke ${e.kind.includes('low power') ? 'from low power' : 'from sleep'} · source ${d.src || '?'}${d.slept ? ' · slept ' + fmtD(+d.slept.replace('s', '')) : ''}`;
+    case e.kind === 'boot': return 'Printer booted (power on)';
+    case e.cat === 'alarm': return `Alarm ${d.code || ''} ${d.name || ''} ${d.text && !d.text.startsWith(d.name || '~') ? '' : ''}`.trim();
+    case /start$/.test(e.kind) && !!e.dur: return `${e.kind.replace(/ start$/, '')} · ${fmtD(e.dur)}`;
+    default: return e.msg;
+  }
+}
+function eventsTab() {
+  const ev = DATA.events.filter(e => e.t);
+  // timeline
+  const rowsDef = [
+    ['Printing', e => e.kind === 'print start'], ['Clean (in print)', e => e.kind === 'clean start' && e.d.inPrint], ['Clean (standalone)', e => e.kind === 'clean start' && !e.d.inPrint],
+    ['White ink stir/circulate', e => e.kind === 'white maintain start' || e.kind === 'low power maintain'], ['Calibration / measure', e => /^(calibration|measure) start$/.test(e.kind)],
+    ['Sleep', e => e.kind === 'enter sleep'], ['Low power', e => e.kind === 'enter low power'], ['Wake-up', e => e.kind.startsWith('wakeup')], ['Boot', e => e.kind === 'boot' || e.kind === 'time synced'], ['Alarm', e => e.cat === 'alarm'],
+  ];
+  const rowColor = { 'Printing': CAT.print.color, 'Clean (in print)': CAT.cleaning.color, 'Clean (standalone)': CAT.cleaning.color, 'White ink stir/circulate': CAT['white-ink'].color,
+    'Calibration / measure': CAT.calibration.color, 'Sleep': CAT.power.color, 'Low power': CAT.power.color, 'Wake-up': CAT.power.color, 'Boot': CAT.power.color, 'Alarm': CAT.alarm.color };
+  const pts = [];
+  ev.forEach((e, idx) => {
+    for (const [row, f] of rowsDef) if (f(e)) {
+      let end = e.t + 60000;
+      if (e.kind === 'print start') { const j = jobs.find(j => j.start === e.t); if (j?.end) end = j.end; }
+      else if (e.dur) end = e.t + e.dur * 1000;
+      else if (e.kind === 'enter sleep' || e.kind === 'enter low power') { const nx = ev.slice(idx + 1).find(x => x.kind.startsWith('wakeup') || x.kind === 'enter low power state' || x.kind === 'low power requested' || x.kind === 'enter low power' || x.kind === 'print start'); if (nx) end = nx.t; }
+      end = Math.max(end, e.t + 60000);
+      pts.push({ x: [e.t, end], y: row, e });
+    }
+  });
+  const rows = rowsDef.map(r => r[0]).filter(r => pts.some(p => p.y === r));
+  mk('#timelineChart', { type: 'bar', data: { labels: rows, datasets: [{ data: pts, backgroundColor: pts.map(p => rowColor[p.y]), borderSkipped: false, borderRadius: 2, barPercentage: 0.7, categoryPercentage: 1, minBarLength: 3 }] },
+    options: { indexAxis: 'y', maintainAspectRatio: false, parsing: { xAxisKey: 'x', yAxisKey: 'y' },
+      plugins: { legend: { display: false }, tooltip: { callbacks: { title: it => fmtT(it[0].raw.e.t), label: c => ' ' + describe(c.raw.e) } } },
+      scales: { x: { type: 'time', min: Math.min(...ev.map(e => e.t)), max: Math.max(...ev.map(e => e.t)) }, y: { grid: { display: false } } } } });
+
+  // maintenance summary
+  const cleans = ev.filter(e => e.kind === 'clean start');
+  const byAction = {};
+  for (const c of cleans) { const k = `${c.d.action}${c.d.inPrint ? ' (in print)' : ''}`; byAction[k] = byAction[k] || { n: 0, dur: 0, ml: 0 }; byAction[k].n++; byAction[k].dur += c.dur || 0; }
+  for (const u of DATA.usage) if (u.src.startsWith('clean: ')) { const k = u.src.slice(7) + (u.job != null ? ' (in print)' : ''); if (byAction[k]) byAction[k].ml += u.ml; }
+  const wm = ev.filter(e => e.kind === 'white maintain start' || e.kind === 'low power maintain');
+  const wmk = {}; for (const w of wm) { const k = (w.d.kind || w.d.action || '').replace('stire', 'stir').replace('whiteStire', 'stir').replace('whiteCycle', 'circulation').replace('cycle', 'circulation'); wmk[k] = (wmk[k] || 0) + 1; }
+  const calib = ev.filter(e => /^(calibration|measure) start$/.test(e.kind));
+  $('#maintSummary').innerHTML = `<table><thead><tr><th>Clean type</th><th class="num">Count</th><th class="num">Total time</th><th class="num">Ink</th></tr></thead><tbody>
+    ${Object.entries(byAction).map(([k, v]) => `<tr><td>${esc(k)}</td><td class="num">${v.n}</td><td class="num">${fmtD(v.dur)}</td><td class="num">${k.startsWith('flash') ? '<span class="muted">in job ink</span>' : ml(v.ml) + ' ml'}</td></tr>`).join('')}</tbody></table>
+    <div class="kv" style="margin-top:12px"><div>White ink stir / circulation</div><div>${chips(wmk) || 0}</div><div>Calibrations / height measures</div><div>${calib.filter(c => c.kind.startsWith('calibration')).length} / ${calib.filter(c => c.kind.startsWith('measure')).length}</div>
+    <div>Alarms</div><div>${ev.filter(e => e.cat === 'alarm').map(e => `<span class="chip" style="color:var(--crit)">${esc(e.d.code)} ${esc(e.d.name || '')}</span>`).join('') || 'none'}</div></div>`;
+
+  const wakes = ev.filter(e => e.kind.startsWith('wakeup'));
+  const src = {}; for (const w of wakes) src[w.d.src || '?'] = (src[w.d.src || '?'] || 0) + 1;
+  const lp = ev.filter(e => e.kind.startsWith('wakeup from low power')).reduce((a, e) => a + (+(e.d.slept || '0s').replace('s', '')), 0);
+  $('#powerSummary').innerHTML = `<div class="kv">
+    <div>Boots</div><div>${DATA.events.filter(e => e.kind === 'boot').length} ${DATA.events.filter(e => e.kind === 'boot').map(e => `<span class="chip">${e.t ? fmtT(e.t) : 'before clock sync'}</span>`).join('')}</div>
+    <div>Entered sleep</div><div>${ev.filter(e => e.kind === 'enter sleep').length}</div>
+    <div>Entered low power</div><div>${ev.filter(e => e.kind === 'enter low power').length} (time in low power ≈ ${fmtD(lp)})</div>
+    <div>Wake-ups by source</div><div>${chips(src)}</div>
+    <div>Software services started</div><div>${DATA.serviceStarts} <span class="muted">(app-controller restarts seen in logs)</span></div></div>
+    <p class="note" style="margin-top:10px">RTC = scheduled wake for white-ink maintenance · BUTTON = power button · USB/WIFI = computer connected · host connect = Studio connected.</p>`;
+
+  // table
+  const cats = Object.keys(CAT).filter(c => DATA.events.some(e => e.cat === c));
+  const defaultOff = new Set(['config', 'calibration']);
+  $('#evFilters').innerHTML = `<input type="search" id="evSearch" placeholder="Search events…">` + cats.map(c => `<label><input type="checkbox" data-c="${c}" ${defaultOff.has(c) ? '' : 'checked'}><span class="sw" style="background:${CAT[c].color}"></span>${CAT[c].label} (${DATA.events.filter(e => e.cat === c).length})</label>`).join('') +
+    `<label><input type="checkbox" id="evFinish"> show finish lines</label><label><input type="checkbox" id="evInPrint" checked> include in-print cleans</label>`;
+  const render = () => {
+    const on = new Set([...document.querySelectorAll('#evFilters input[data-c]:checked')].map(i => i.dataset.c));
+    const q = $('#evSearch').value.toLowerCase(), fin = $('#evFinish').checked, inp = $('#evInPrint').checked;
+    const list = DATA.events.filter(e => on.has(e.cat) && (fin || !e.paired) && (inp || !(e.cat === 'cleaning' && (e.d.inPrint || e.kind.includes('in print')))) && (!q || (e.msg + describe(e)).toLowerCase().includes(q))).slice().reverse();
+    $('#evTable').innerHTML = `<thead><tr><th>Time</th><th>Category</th><th>Event</th><th>Raw log</th></tr></thead><tbody>` +
+      list.slice(0, 2000).map(e => `<tr><td style="white-space:nowrap">${e.t ? fmtT(e.t) : '<span class="muted">' + esc(e.rawTs) + '</span>'}</td><td style="white-space:nowrap"><span class="sw" style="background:${CAT[e.cat].color}"></span>${CAT[e.cat].label}</td><td>${e.level !== 'I' ? `<span class="lvl ${e.level}">${e.level === 'W' ? 'WARN' : 'ERR'}</span> ` : ''}${esc(describe(e))}</td><td class="muted"><code>${esc(e.msg)}</code></td></tr>`).join('') + '</tbody>';
+  };
+  $('#evFilters').oninput = render;
+  render();
+}
+
+// ---------------------------------------------------------------- about
+function aboutTab() {
+  const off = ms => ms == null ? 'n/a' : `UTC${ms >= 0 ? '+' : '−'}${Math.abs(ms) / 3600000}`;
+  $('#aboutKv').innerHTML = `    <div>Printer clock</div><div>${off(DATA.deviceOffsetMs)} (${esc(DATA.deviceOffsetSource)})</div>
+    <div>Desktop clock</div><div>${off(DATA.desktopOffsetMs)} (${esc(DATA.desktopOffsetSource)})</div>
+    <div>Firmware</div><div>${esc(DATA.firmware || '?')}</div>
+    <div>Device events</div><div>${DATA.events.length}</div>
+    <div>Ink snapshots</div><div>${sum(Object.values(DATA.inkSeries).map(s => s.length))}</div>
+    <div>Jobs with layer detail</div><div>${realJobs.filter(j => j.elements?.length).length} of ${realJobs.length}</div>
+    <div>Jobs with per-layer inks</div><div>${realJobs.filter(j => inkCoverage(j) === 'slicer').length} of ${realJobs.length} <span class="muted">(from xTool Studio's slicer log)</span></div>`;
+  const missing = realJobs.filter(j => inkCoverage(j) !== 'slicer');
+  $('#slicerCoverage').innerHTML = missing.length ? `<div style="font-size:13px;margin-bottom:4px"><span class="warnchip">⚠</span> Jobs without per-layer inks: varnish layers may show as white. Drop the xTool Studio <code>logs</code> folder (with its <code>algo-server</code> sub-folders) from the computer that sent them onto this page to add it.</div>
+    <table><thead><tr><th>Started</th><th>Job</th><th>Why</th></tr></thead><tbody>${missing.map(j => `<tr><td style="white-space:nowrap">${fmtT(j.start)}</td><td>${esc(j.name || j.taskId)}</td><td class="muted">${inkCoverage(j) === null ? 'no xTool Studio logs for this job' : inkCoverage(j) === 'partial' ? 'some elements missing from the slicer log' : 'not in any slicer log loaded'}</td></tr>`).join('')}</tbody></table>` : '';
+  $('#fileList').textContent = DATA.files.join('\n');
+  const st = DATA.stats || {};
+  $('#sourceTable').innerHTML = `<thead><tr><th>Source</th><th>Printer logs up to (printer clock)</th><th>xTool Studio days</th><th class="num">Slicer logs</th></tr></thead><tbody>` +
+    (st.sources || []).map(s => `<tr><td>${esc(s.file)}${s.error ? ` <span style="color:var(--crit)">${esc(s.error)}</span>` : ''}</td><td>${s.device ? esc(s.deviceLast) : '<span class="muted">—</span>'}</td><td>${s.desktopDays.length ? esc(s.desktopDays[0]) + (s.desktopDays.length > 1 ? ' … ' + esc(s.desktopDays[s.desktopDays.length - 1]) : '') + ` (${s.desktopDays.length})` : '<span class="muted">—</span>'}</td><td class="num">${s.slicerLogs ?? '—'}</td></tr>`).join('') + '</tbody>';
+  $('#dupNote').textContent = st.record ? `Duplicates discarded: ${st.record.duplicates} printer events, ${st.appController.duplicates} controller log records, ${st.desktopDropped} xTool Studio day-logs that were older copies of another.` : '';
+}
+
+// ---------------------------------------------------------------- boot
+function renderAll() {
+  if (!DATA) return;
+  charts.splice(0).forEach(c => c.destroy());
+  chartDefaults();
+  header(); overview(); jobsTab(); inkTab(); eventsTab(); aboutTab();
+}
+document.querySelectorAll('#tabs button').forEach(b => b.onclick = () => {
+  document.querySelectorAll('#tabs button').forEach(x => x.classList.toggle('on', x === b));
+  document.querySelectorAll('section').forEach(s => s.classList.toggle('on', s.id === b.dataset.t));
+  try { localStorage.setItem('omniTab', b.dataset.t); } catch (e) {}
+});
+$('#themeBtn').onclick = () => {
+  const dark = document.documentElement.dataset.theme ? document.documentElement.dataset.theme === 'dark' : matchMedia('(prefers-color-scheme: dark)').matches;
+  document.documentElement.dataset.theme = dark ? 'light' : 'dark';
+  renderAll();
+};
+
+// ---------------------------------------------------------------- loading logs in the browser
+function showReport(data) {
+  DATA = data;
+  tankKeys = Object.keys(DATA.tanks).filter(k => DATA.inkSeries[k]).sort();
+  jobs = DATA.jobs;
+  realJobs = jobs.filter(j => !j.isTest);
+  $('#loader').hidden = true;
+  $('#report').hidden = false;
+  $('#tabs').hidden = false;
+  $('#reloadBtn').hidden = !window.OmniParser;
+  renderAll();
+  try { const t = localStorage.getItem('omniTab'); if (t) document.querySelector(`#tabs button[data-t="${t}"]`)?.click(); } catch (e) {}
+}
+function showLoader() {
+  $('#report').hidden = true;
+  $('#tabs').hidden = true;
+  $('#reloadBtn').hidden = true;
+  $('#loader').hidden = false;
+  $('#subtitle').textContent = 'Print-job, ink and maintenance report for the xTool Omni O1 (Dual-UV) UV printer.';
+}
+
+let loaded = [];   // [{path, file}] chosen so far; more can be added
+async function addItems(items) {
+  if (!items.length) return;
+  const known = new Set(loaded.map(it => it.path + '\u0000' + it.file.size));
+  loaded = loaded.concat(items.filter(it => !known.has(it.path + '\u0000' + it.file.size)));
+  const err = $('#loadError'), prog = $('#progress');
+  err.style.display = 'none';
+  prog.style.display = 'block';
+  const setP = (f, label) => { prog.querySelector('.fill').style.width = (f * 100).toFixed(1) + '%'; prog.querySelector('.label').textContent = label; };
+  const t0 = performance.now();
+  try {
+    if (!window.fflate) throw new Error('The unzip library could not be loaded. Check your internet connection and reload the page.');
+    const sources = await OmniParser.loadSources(loaded, setP);
+    setP(0.99, 'Analysing…');
+    await new Promise(r => setTimeout(r, 0));
+    const data = OmniParser.analyze(sources);
+    data.loadSeconds = (performance.now() - t0) / 1000;
+    window.OMNI_DATA = data;
+    prog.style.display = 'none';
+    if (!data.events.some(e => e.t)) {
+      const studio = data.stats.sources.some(s => s.desktopDays.length);
+      throw new Error(`No printer logs found in ${data.sources.join(', ') || 'these files'}. ` + (studio
+        ? 'These look like xTool Studio logs only; also add a log export from the printer (xTool_dt002_log.gz).'
+        : 'Drop the log export from xTool Studio (xTool_dt002_log.gz) or a zip of the xTool Studio logs folder.'));
+    }
+    showReport(data);
+  } catch (e) {
+    console.error(e);
+    prog.style.display = 'none';
+    err.textContent = e.message || String(e);
+    err.style.display = 'block';
+  }
+  $('#queued').textContent = loaded.length ? `Loaded: ${[...new Set(loaded.map(it => it.path.split('/')[0]))].join(', ')}` : '';
+}
+
+// folders dropped on the page: walk them with the entries API
+async function entryItems(entry) {
+  if (entry.isFile) return [{ path: entry.fullPath.replace(/^\//, ''), file: await new Promise((res, rej) => entry.file(res, rej)) }];
+  if (!entry.isDirectory) return [];
+  const reader = entry.createReader(), out = [];
+  for (;;) {
+    const batch = await new Promise((res, rej) => reader.readEntries(res, rej));
+    if (!batch.length) break;
+    for (const e of batch) out.push(...await entryItems(e));
+  }
+  return out;
+}
+function setupLoader() {
+  const drop = $('#drop');
+  $('#pickFiles').onclick = () => $('#fileInput').click();
+  $('#pickFolder').onclick = () => $('#folderInput').click();
+  $('#fileInput').onchange = e => { addItems([...e.target.files].map(f => ({ path: f.name, file: f }))); e.target.value = ''; };
+  $('#folderInput').onchange = e => { addItems([...e.target.files].map(f => ({ path: f.webkitRelativePath || f.name, file: f }))); e.target.value = ''; };
+  document.addEventListener('dragover', e => { e.preventDefault(); drop.classList.add('over'); });
+  document.addEventListener('dragleave', e => { if (!e.relatedTarget) drop.classList.remove('over'); });
+  document.addEventListener('drop', async e => {
+    e.preventDefault();
+    drop.classList.remove('over');
+    if (!window.OmniParser) return;
+    const entries = [...e.dataTransfer.items].map(i => i.webkitGetAsEntry && i.webkitGetAsEntry()).filter(Boolean);
+    const items = entries.length ? (await Promise.all(entries.map(entryItems))).flat()
+      : [...e.dataTransfer.files].map(f => ({ path: f.name, file: f }));
+    if ($('#loader').hidden) showLoader();   // dropping onto a report adds to the logs already loaded
+    addItems(items);
+  });
+  $('#reloadBtn').onclick = () => { loaded = []; $('#queued').textContent = ''; showLoader(); };
+}
+
+setupLoader();
+if (DATA) showReport(DATA); else showLoader();
+</script>
+</body>
+</html>
