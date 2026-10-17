@@ -4,7 +4,7 @@ See what your **xTool Omni O1 (Dual-UV)** UV printer has been doing: every print
 
 It reads the log files that xTool Studio can export, and turns them into an interactive report in your web browser.
 
-**Open the viewer:** https://YOUR-GITHUB-NAME.github.io/omni-log-viewer/ *(replace with the real link once published)*
+**Open the viewer:** https://coolbeansdesign.github.io/omni-log-viewer/
 
 > Not affiliated with, endorsed by or supported by xTool. "xTool", "xTool Studio" and "Omni" are xTool's names for their products.
 
@@ -74,11 +74,13 @@ It reads every `.gz` and `.zip` in the folders you give it (plus, on a Mac, xToo
 
 `omni_parser.py` and `omni_parser.js` contain the same parser in Python and JavaScript; a change to one should be made to the other.
 
-## Publishing on GitHub Pages
+## Publishing your own copy on GitHub Pages
 
-1. Create a repository and push these files.
+1. Fork or create a repository and push these files.
 2. In the repository go to **Settings → Pages**, set **Source** to "Deploy from a branch", choose `main` and `/ (root)`, and save.
-3. After a minute the viewer is live at `https://<your-name>.github.io/<repository>/`. Update the link at the top of this README.
+3. After a minute the viewer is live at `https://<your-name>.github.io/<repository>/`.
+
+If you fork this project, steps 2–3 publish your own copy.
 
 The `.gitignore` keeps `.gz`, `.zip`, log files and generated reports out of the repository, so nobody's logs get committed by accident.
 
