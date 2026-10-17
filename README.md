@@ -1,4 +1,8 @@
+<p align="center"><a href="https://www.coolbeansdesign.com"><img src="assets/coolbeans-logo.png" alt="CoolBeans Design" width="220"></a></p>
+
 # xTool Omni Log Viewer
+
+By [CoolBeans Design](https://www.coolbeansdesign.com).
 
 See what your **xTool Omni O1 (Dual-UV)** UV printer has been doing: every print job, how much ink each one used, which layers were white, varnish or colour, head cleans, white-ink stirring, sleep and wake-ups, alarms, and how much ink went to maintenance rather than printing.
 
@@ -91,6 +95,7 @@ The `.gitignore` keeps `.gz`, `.zip`, log files and generated reports out of the
 | `index.html` | The viewer page (loader and report) |
 | `omni_parser.js` | Log parser used by the page |
 | `omni_parser.py`, `omni_log_viewer.py` | Command-line version; uses `index.html` as its report template |
+| `assets/coolbeans-logo.png` | CoolBeans Design logo for this README |
 
 ## License
 
