@@ -238,6 +238,9 @@ def classify_record(msg):
         if m:
             d['action'], d['head'] = m.group(1), m.group(2)
         return 'cleaning', head, d
+    if head == 'low power maintain' and d.get('action') == 'standardClean':
+        # a scheduled standard clean the printer runs while in low power (seen on the UV/DT)
+        return 'cleaning', 'clean start', {'action': 'scheduled standard', 'head': None, 'inPrint': False, 'scheduled': True}
     if head.startswith('white ') or head == 'low power maintain':
         return 'white-ink', head, d
     if head in ('boot', 'time synced', 'upgrade completed'):
@@ -252,6 +255,10 @@ def classify_record(msg):
             d['code'], d['name'] = m.group(1), m.group(2)
         d['text'] = rest
         return 'alarm', 'alarm', d
+    if head in ('ink tank removed', 'ink tank inserted', 'moisture tank removed', 'moisture tank inserted'):
+        return 'cartridge', head, d
+    if head == 'upgrade start':
+        return 'power', head, d
     if head == 'config set':
         return 'config', head, {'text': rest}
     return 'other', head, {'text': rest}
@@ -464,7 +471,8 @@ def parse_desktop_main(text, file_label):
     return jobs, tasks_seen
 
 
-GENPD_RX = re.compile(r'\[GenPd\] eleIndex=(\d+), imgIndex=(\d+), color: (\w+),.*?/atomm/DT002/task/(\w+)/+uv/\d+_([0-9a-f]{8})/')
+# Paths use / on Mac and \\ on Windows; UV jobs have one folder per element, DTF jobs a dtf/<n> folder.
+GENPD_RX = re.compile(r'\[GenPd\] eleIndex=(\d+), imgIndex=(\d+), color: (\w+),.*?atomm[\\/]+DT002[\\/]+task[\\/]+(\w+)[\\/]+(?:uv[\\/]+\d+_([0-9a-f]{8})|dtf[\\/]+(\d+))[\\/]')
 
 
 def parse_genpd(texts):
@@ -475,7 +483,8 @@ def parse_genpd(texts):
     out = {}
     for text in texts:
         for m in GENPD_RX.finditer(text):
-            ele, img, ink, tid, key = int(m.group(1)), int(m.group(2)), m.group(3), m.group(4), m.group(5)
+            ele, img, ink, tid = int(m.group(1)), int(m.group(2)), m.group(3), m.group(4)
+            key = m.group(5) or 'dtf' + m.group(6)
             out.setdefault(tid, {}).setdefault(key, {})[img] = (ele, ink)
     return {tid: {k: [v[i][1] for i in sorted(v)] for k, v in els.items()} for tid, els in out.items()}
 
@@ -665,6 +674,7 @@ def analyze(sources):
         series[key].sort()
         tank_info[key]['full'] = series[key][-1][2]
         tank_info[key]['head'] = int(key.split('-')[0]) + 1
+    model = detect_model(tank_info)
 
     # ---------- events ----------
     events = []
@@ -775,6 +785,7 @@ def analyze(sources):
         'desktopOffsetMs': desk_off, 'desktopOffsetSource': desk_off_src,
         'firmware': next((e['d'].get('version') for e in events if e['kind'] == 'upgrade completed'), None),
         'tanks': tank_info,
+        'model': model,
         'inkSeries': series,
         'moistSeries': moist_series,
         'moistTanks': moist_tanks,
@@ -790,6 +801,17 @@ def analyze(sources):
         'files': files,
         'stats': stats,
     }
+
+
+def detect_model(tank_info):
+    """Which Omni O1 variant this is, from the cartridges on the second head:
+    DTG inks = UV/DT, fluorescent / flexible / rigid white = Dual-UV."""
+    head2 = {v.get('code') for k, v in tank_info.items() if k.startswith('1-')}
+    if head2 & {'DC', 'DM', 'DY', 'DK', 'DS'}:
+        return {'name': 'Omni O1 UV/DT', 'basis': 'DTG cartridges on head 2'}
+    if head2 & {'UH', 'UR', 'US', 'UD'}:
+        return {'name': 'Omni O1 Dual-UV', 'basis': 'fluorescent and white UV cartridges on head 2'}
+    return {'name': None, 'basis': None}
 
 
 def _apply_layer_inks(job, genpd_els):
@@ -824,7 +846,7 @@ def _attribute(t0, t1, jobs, events):
         if e['t'] and t0 < e['t'] <= t1:
             if e['cat'] == 'cleaning' and e['kind'] == 'clean start' and e['d'].get('action') != 'flash':
                 clean = e
-            elif e['cat'] in ('cleaning', 'white-ink'):
+            elif (e['cat'] == 'cleaning' and e['kind'] == 'clean start') or e['cat'] == 'white-ink':
                 maint = e
     job = None
     for i, j in enumerate(jobs):

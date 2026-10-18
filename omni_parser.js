@@ -346,6 +346,8 @@ function classifyRecord(msg) {
     if (m) { d.action = m[1]; d.head = m[2]; }
     return ['cleaning', head, d];
   }
+  // a scheduled standard clean the printer runs while in low power (seen on the UV/DT)
+  if (head === 'low power maintain' && d.action === 'standardClean') return ['cleaning', 'clean start', { action: 'scheduled standard', head: null, inPrint: false, scheduled: true }];
   if (head.startsWith('white ') || head === 'low power maintain') return ['white-ink', head, d];
   if (['boot', 'time synced', 'upgrade completed'].includes(head)) return ['power', head, d];
   if (head.includes('sleep') || head.includes('low power')) return ['power', head, d];
@@ -356,6 +358,8 @@ function classifyRecord(msg) {
     d.text = rest;
     return ['alarm', 'alarm', d];
   }
+  if (['ink tank removed', 'ink tank inserted', 'moisture tank removed', 'moisture tank inserted'].includes(head)) return ['cartridge', head, d];
+  if (head === 'upgrade start') return ['power', head, d];
   if (head === 'config set') return ['config', head, { text: rest }];
   return ['other', head, { text: rest }];
 }
@@ -548,7 +552,8 @@ function parseDesktopMain(text, fileLabel) {
   return [jobs, tasksSeen];
 }
 
-const GENPD_RX = /\[GenPd\] eleIndex=(\d+), imgIndex=(\d+), color: (\w+),.*?\/atomm\/DT002\/task\/(\w+)\/+uv\/\d+_([0-9a-f]{8})\//g;
+// Paths use / on Mac and \ on Windows; UV jobs have one folder per element, DTF jobs a dtf/<n> folder.
+const GENPD_RX = /\[GenPd\] eleIndex=(\d+), imgIndex=(\d+), color: (\w+),.*?atomm[\\/]+DT002[\\/]+task[\\/]+(\w+)[\\/]+(?:uv[\\/]+\d+_([0-9a-f]{8})|dtf[\\/]+(\d+))[\\/]/g;
 
 /* xTool Studio's slicer (algo-server) logs which ink each layer image is
  * printed with: HW/SW/W = white, V = varnish, C = colour. This is the only
@@ -558,7 +563,7 @@ function parseGenpd(texts) {
   const out = new Map();
   for (const text of texts) {
     for (const m of text.matchAll(GENPD_RX)) {
-      const ele = parseInt(m[1], 10), img = parseInt(m[2], 10), ink = m[3], tid = m[4], key = m[5];
+      const ele = parseInt(m[1], 10), img = parseInt(m[2], 10), ink = m[3], tid = m[4], key = m[5] || 'dtf' + m[6];
       setdefault(setdefault(out, tid, new Map()), key, new Map()).set(img, [ele, ink]);
     }
   }
@@ -859,6 +864,7 @@ function analyze(sources) {
     desktopOffsetMs: deskOff, desktopOffsetSource: deskOffSrc,
     firmware: fw ? get(fw.d, 'version') : null,
     tanks: Object.fromEntries(tankInfo),
+    model: detectModel(tankInfo),
     inkSeries: Object.fromEntries(series),
     moistSeries,
     moistTanks,
@@ -875,6 +881,15 @@ function analyze(sources) {
     stats,
     sources: stats.sources.map(s => s.file),
   };
+}
+
+/* Which Omni O1 variant this is, from the cartridges on the second head:
+   DTG inks = UV/DT, fluorescent / flexible / rigid white = Dual-UV. Mirrors detect_model. */
+function detectModel(tankInfo) {
+  const head2 = new Set([...tankInfo].filter(([k]) => k.startsWith('1-')).map(([, v]) => v.code));
+  if (['DC', 'DM', 'DY', 'DK', 'DS'].some(c => head2.has(c))) return { name: 'Omni O1 UV/DT', basis: 'DTG cartridges on head 2' };
+  if (['UH', 'UR', 'US', 'UD'].some(c => head2.has(c))) return { name: 'Omni O1 Dual-UV', basis: 'fluorescent and white UV cartridges on head 2' };
+  return { name: null, basis: null };
 }
 
 /* Give each element its per-layer inks: from the slicer log when present,
@@ -907,7 +922,7 @@ function attribute(t0, t1, jobs, events) {
   for (const e of events) {
     if (truthy(e.t) && t0 < e.t && e.t <= t1) {
       if (e.cat === 'cleaning' && e.kind === 'clean start' && get(e.d, 'action') !== 'flash') clean = e;
-      else if (e.cat === 'cleaning' || e.cat === 'white-ink') maint = e;
+      else if ((e.cat === 'cleaning' && e.kind === 'clean start') || e.cat === 'white-ink') maint = e;
     }
   }
   let job = null;

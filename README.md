@@ -4,7 +4,7 @@
 
 By [CoolBeans Design](https://www.coolbeansdesign.com).
 
-See what your **xTool Omni O1 (Dual-UV)** UV printer has been doing: every print job, how much ink each one used, which layers were white, varnish or colour, head cleans, white-ink stirring, sleep and wake-ups, alarms, and how much ink went to maintenance rather than printing.
+See what your **xTool Omni O1** UV printer (Dual-UV or UV/DT) has been doing: every print job, how much ink each one used, which layers were white, varnish or colour, head cleans, white-ink stirring, sleep and wake-ups, alarms, and how much ink went to maintenance rather than printing.
 
 It reads the log files that xTool Studio can export, and turns them into an interactive report in your web browser.
 
@@ -35,7 +35,7 @@ xTool Studio keeps its own logs on every computer you print from. They add job n
 | Computer | Where the folder is |
 | --- | --- |
 | Mac | `~/Library/Application Support/xTool Studio/logs` — in Finder choose **Go → Go to Folder…** and paste that path |
-| Windows | Probably `%APPDATA%\xTool Studio\logs` — paste it into File Explorer's address bar *(not yet confirmed; please open an issue if yours is elsewhere)* |
+| Windows | `%APPDATA%\xTool Studio\logs` — paste it into File Explorer's address bar |
 
 Use the **whole `logs` folder**, including the `algo-server` folders inside the dated folders. You can either:
 
