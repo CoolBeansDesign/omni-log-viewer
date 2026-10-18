@@ -406,6 +406,78 @@ function parseAppController(texts) {
   return [ink, moist, counters, boots];
 }
 
+// ---- per-head time counters ------------------------------------------------
+
+const HEAD_STAT_RX = /AppHeadTimeStat(?:::add| on print start:) head=(\d) counter=(\w+) (?:addSec=\d+ total=(\d+)|value=(\d+))/;
+const THRESH_RX = /cache in-print clean thresholds: (.*)$/;
+const SEVEN_DAYS = 7 * 24 * 3600;
+const LINE_FILL_RX = /^\[(\d{4}-[^\]]+)\].*?\b(ink|white) pipeline fill consumed: route=\d+, ch=\d+, slot=(\d+), ml=([\d.]+)/gm;
+const RATE_WINDOW_MS = 48 * 3600 * 1000;
+
+/* The printer keeps per-head time counters (seconds): Idle (time not working
+   since the head's last standard clean; keeps counting while asleep), NoRun,
+   WhiteNoRun, ColorNoRun, FluNoRun, MoistNoRun, Moisrizing, ContinousWork.
+   They are only logged when the printer changes state, so values are
+   snapshots. Also returns the clean thresholds the firmware reports, and an
+   estimate of when each head's Idle reaches 7 days, assuming the printer
+   stays idle the same share of the time as in the last 48 h of the logs.
+   (The 7-day moisturizing trigger is not shown in any log; it is an assumption.)
+   Mirrors parse_head_timers in omni_parser.py. */
+function parseHeadTimers(acText, devT, config) {
+  const heads = {};
+  const thresholds = {};
+  for (const line of splitlines(acText)) {
+    if (line.includes('AppHeadTimeStat')) {
+      const m = DEV_LINE.exec(line);
+      if (!m || !validClock(m[1])) continue;
+      const s = HEAD_STAT_RX.exec(m[4]);
+      if (!s) continue;
+      const h = heads[s[1]] = heads[s[1]] || { counters: {}, idle: [] };
+      const val = parseInt(s[3] != null ? s[3] : s[4], 10);
+      const t = devT(m[1]);
+      h.counters[s[2]] = { value: val, t };
+      if (s[2] === 'Idle') h.idle.push([t, val]);
+    } else if (line.includes('cache in-print clean thresholds')) {
+      const x = THRESH_RX.exec(line);
+      if (x) for (const k of x[1].matchAll(/(\w+(?:\([^)]*\))?)=([\d/]+)/g)) thresholds[k[1]] = k[2];
+    }
+  }
+  if (config.uvPrintNorunTimeSwitchMoisturizing != null)
+    thresholds.uvPrintNorunTimeSwitchMoisturizing = String(config.uvPrintNorunTimeSwitchMoisturizing);
+
+  for (const h of Object.values(heads)) {
+    const pts = h.idle;
+    // last reset: a reading lower than the one before it
+    h.lastReset = null;
+    for (let i = 0; i + 1 < pts.length; i++) {
+      const [, v0] = pts[i], [t1, v1] = pts[i + 1];
+      if (v1 < v0) h.lastReset = v1 ? t1 - v1 * 1000 : t1;
+    }
+    if (!pts.length) { h.estimate = null; continue; }
+    const end = pts[pts.length - 1][0];
+    const start = end - RATE_WINDOW_MS;
+    let idleSec = 0;
+    for (let i = 0; i + 1 < pts.length; i++) {
+      const [t0, v0] = pts[i], [t1, v1] = pts[i + 1];
+      if (t1 <= start || t1 === t0) continue;
+      let d = v1 >= v0 ? v1 - v0 : v1;
+      if (t0 < start) d *= (t1 - start) / (t1 - t0);
+      idleSec += d;
+    }
+    const span = (end - Math.max(start, pts[0][0])) / 1000;
+    const frac = span > 0 ? Math.min(1, idleSec / span) : null;
+    const latest = pts[pts.length - 1][1];
+    const remaining = SEVEN_DAYS - latest;
+    h.estimate = {
+      windowStart: Math.max(start, pts[0][0]), windowEnd: end,
+      idleFraction: frac, latest, latestT: end,
+      remainingSec: remaining,
+      reachT: frac && remaining > 0 ? end + remaining / frac * 1000 : (remaining <= 0 ? end : null),
+    };
+  }
+  return { heads, thresholds, target: SEVEN_DAYS };
+}
+
 // --------------------------------------------------------------------------
 // Desktop (xTool Studio) main.log: job configuration
 // --------------------------------------------------------------------------
@@ -767,6 +839,12 @@ function analyze(sources) {
   }
 
   const countersLatest = counters.length ? counters[counters.length - 1][1] : {};
+  const configAll = {};
+  for (const [, c] of counters) Object.assign(configAll, c);
+  const headTimers = parseHeadTimers(acText, devT, configAll);
+  // line-fill amounts the printer deducts when it first fills each ink line
+  const lineFills = [...acText.matchAll(LINE_FILL_RX)].filter(m => validClock(m[1]))
+    .map(m => ({ t: devT(m[1]), kind: m[2], tank: `${Math.floor(+m[3] / 6)}-${+m[3] % 6}`, ml: parseFloat(m[4]) }));
   const countersSeries = counters.map(([ts, c]) => [devT(ts), c]);
   const step = Math.max(1, Math.floor(countersSeries.length / 200));
 
@@ -789,6 +867,8 @@ function analyze(sources) {
     jobs,
     events,
     counters: countersLatest,
+    headTimers,
+    lineFills,
     countersSeries: countersSeries.filter((_, i) => i % step === 0),
     serviceStarts: bootTs.length,
     files,
@@ -841,7 +921,7 @@ function attribute(t0, t1, jobs, events) {
   return ['other', null];
 }
 
-const api = { loadSources, analyze, findInputs, _internal: { splitlines, pyRound, num, naiveMs, readTar, mergeDeviceLogs, parseGenpd } };
+const api = { loadSources, analyze, findInputs, _internal: { splitlines, pyRound, num, naiveMs, readTar, mergeDeviceLogs, parseGenpd, parseHeadTimers } };
 if (typeof module !== 'undefined' && module.exports) module.exports = api;
 else root.OmniParser = api;
 })(typeof self !== 'undefined' ? self : this);

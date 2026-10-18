@@ -308,6 +308,81 @@ def parse_app_controller(texts):
                         pass
     return ink, moist, counters, boots
 
+# ---- per-head time counters ------------------------------------------------
+
+HEAD_STAT_RX = re.compile(r'AppHeadTimeStat(?:::add| on print start:) head=(\d) counter=(\w+) (?:addSec=\d+ total=(\d+)|value=(\d+))')
+THRESH_RX = re.compile(r'cache in-print clean thresholds: (.*)$')
+SEVEN_DAYS = 7 * 24 * 3600
+LINE_FILL_RX = re.compile(r'^\[(\d{4}-[^\]]+)\].*?\b(ink|white) pipeline fill consumed: route=\d+, ch=\d+, slot=(\d+), ml=([\d.]+)', re.M)
+RATE_WINDOW_MS = 48 * 3600 * 1000
+
+
+def parse_head_timers(ac_text, dev_t, config):
+    """The printer keeps per-head time counters (seconds): Idle (time not working
+    since the head's last standard clean; keeps counting while asleep), NoRun,
+    WhiteNoRun, ColorNoRun, FluNoRun, MoistNoRun, Moisrizing, ContinousWork.
+    They are only logged when the printer changes state, so values are
+    snapshots. Also returns the clean thresholds the firmware reports, and an
+    estimate of when each head's Idle reaches 7 days, assuming the printer
+    stays idle the same share of the time as in the last 48 h of the logs.
+    (The 7-day moisturizing trigger is not shown in any log; it is an assumption.)"""
+    heads = {}
+    thresholds = {}
+    for line in ac_text.splitlines():
+        if 'AppHeadTimeStat' in line:
+            m = DEV_LINE.match(line)
+            if not m or not valid_clock(m.group(1)):
+                continue
+            s = HEAD_STAT_RX.search(m.group(4))
+            if not s:
+                continue
+            h = heads.setdefault(s.group(1), {'counters': {}, 'idle': []})
+            val = int(s.group(3) or s.group(4))
+            t = dev_t(m.group(1))
+            h['counters'][s.group(2)] = {'value': val, 't': t}
+            if s.group(2) == 'Idle':
+                h['idle'].append([t, val])
+        elif 'cache in-print clean thresholds' in line:
+            x = THRESH_RX.search(line)
+            if x:
+                for k, v in re.findall(r'(\w+(?:\([^)]*\))?)=([\d/]+)', x.group(1)):
+                    thresholds[k] = v
+    if config.get('uvPrintNorunTimeSwitchMoisturizing') is not None:
+        thresholds['uvPrintNorunTimeSwitchMoisturizing'] = str(config['uvPrintNorunTimeSwitchMoisturizing'])
+
+    for h in heads.values():
+        pts = h['idle']
+        # last reset: a reading lower than the one before it
+        h['lastReset'] = None
+        for (t0, v0), (t1, v1) in zip(pts, pts[1:]):
+            if v1 < v0:
+                h['lastReset'] = t1 - v1 * 1000 if v1 else t1
+        if not pts:
+            h['estimate'] = None
+            continue
+        end = pts[-1][0]
+        start = end - RATE_WINDOW_MS
+        idle_sec = 0.0
+        for (t0, v0), (t1, v1) in zip(pts, pts[1:]):
+            if t1 <= start or t1 == t0:
+                continue
+            d = v1 - v0 if v1 >= v0 else v1
+            if t0 < start:
+                d *= (t1 - start) / (t1 - t0)
+            idle_sec += d
+        span = (end - max(start, pts[0][0])) / 1000
+        frac = min(1.0, idle_sec / span) if span > 0 else None
+        latest = pts[-1][1]
+        remaining = SEVEN_DAYS - latest
+        h['estimate'] = {
+            'windowStart': max(start, pts[0][0]), 'windowEnd': end,
+            'idleFraction': frac, 'latest': latest, 'latestT': end,
+            'remainingSec': remaining,
+            'reachT': (end + remaining / frac * 1000) if frac and remaining > 0 else (end if remaining <= 0 else None),
+        }
+    return {'heads': heads, 'thresholds': thresholds, 'target': SEVEN_DAYS}
+
+
 # --------------------------------------------------------------------------
 # Desktop (xTool Studio) main.log: job configuration
 # --------------------------------------------------------------------------
@@ -679,6 +754,14 @@ def analyze(sources):
                     u[key] = u.get(key, 0) + d
 
     counters_latest = counters[-1][1] if counters else {}
+    config_all = {}
+    for _, c in counters:
+        config_all.update(c)
+    head_timers = parse_head_timers(ac_text, dev_t, config_all)
+    # line-fill amounts the printer deducts when it first fills each ink line
+    line_fills = [{'t': dev_t(m.group(1)), 'kind': m.group(2), 'tank': f'{int(m.group(3)) // 6}-{int(m.group(3)) % 6}',
+                   'ml': float(m.group(4))}
+                  for m in LINE_FILL_RX.finditer(ac_text) if valid_clock(m.group(1))]
     counters_series = [(dev_t(ts), c) for ts, c in counters]
 
     moist_series = {}
@@ -700,6 +783,8 @@ def analyze(sources):
         'jobs': jobs,
         'events': [e for e in events],
         'counters': counters_latest,
+        'headTimers': head_timers,
+        'lineFills': line_fills,
         'countersSeries': counters_series[::max(1, len(counters_series) // 200)],
         'serviceStarts': len(boot_ts),
         'files': files,

@@ -66,9 +66,10 @@ input[type=search] { font: inherit; padding: 6px 10px; border: 1px solid var(--l
 .lvl { font-size: 11px; padding: 1px 6px; border-radius: 4px; font-weight: 600; }
 .lvl.W { color: var(--warn); } .lvl.E { color: var(--crit); }
 .muted { color: var(--muted); }
-.tank { display: grid; grid-template-columns: 120px 1fr 110px; gap: 10px; align-items: center; padding: 4px 0; }
+.tank { display: grid; grid-template-columns: 120px 1fr max-content; gap: 10px; align-items: center; padding: 4px 0; }
 .tank .track { height: 14px; background: var(--chip); border-radius: 4px; overflow: hidden; }
 .tank .fill { height: 100%; border-radius: 4px; }
+@media (max-width: 600px) { .tank { grid-template-columns: 100px 1fr auto; } .tank .mlv { display: block; font-size: 11px; } }
 .kv { display: grid; grid-template-columns: max-content 1fr; gap: 3px 14px; font-size: 13px; }
 .kv div:nth-child(odd) { color: var(--ink2); }
 details summary { cursor: pointer; color: var(--ink2); }
@@ -114,6 +115,7 @@ footer .brand img { height: 30px; width: auto; }
     <button data-t="ink">Ink usage</button>
     <button data-t="events">Maintenance &amp; events</button>
     <button data-t="about">About the data</button>
+    <button data-t="changelog">Change log</button>
   </nav>
 </header>
 <div id="loader" hidden>
@@ -151,7 +153,7 @@ footer .brand img { height: 30px; width: auto; }
   <div class="tiles" id="tiles"></div>
   <div class="grid2">
     <div class="card"><h2>Ink remaining</h2><p class="note">Current cartridge level (latest snapshot from the printer).</p><div id="tankLevels"></div></div>
-    <div class="card"><h2>Where the ink went</h2><p class="note">Total ml consumed across all tanks, by cause.</p><div class="chart"><canvas id="causeChart"></canvas></div></div>
+    <div class="card"><h2>Where the ink went</h2><p class="note">Total ml consumed across all tanks, by cause. Initial priming is the one-time fill of the ink lines at setup (see Ink usage → Setup ink priming).</p><div class="chart"><canvas id="causeChart"></canvas></div></div>
   </div>
   <div class="grid2">
     <div class="card"><h2>Lifetime counters</h2><p class="note">Reported by the printer (seconds unless noted).</p><div class="kv" id="counters"></div></div>
@@ -185,10 +187,32 @@ footer .brand img { height: 30px; width: auto; }
     <p class="note">Remaining ml per cartridge. Shaded bands are print jobs.</p>
     <div class="chart tall"><canvas id="levelChart"></canvas></div>
   </div>
+  <div class="card" id="forecastCard">
+    <h2>When cartridges reach 20%</h2>
+    <p class="note" id="forecastNote"></p>
+    <div class="scroll"><table id="forecastTable"></table></div>
+    <details style="margin-top:10px"><summary>How this is worked out</summary>
+      <ul class="note" style="margin:8px 0 0;padding-left:18px">
+        <li><b>Active days:</b> calendar days (your local time) with at least one print job. The forecast uses the 3 most recent ones, or fewer if the logs don't have 3 yet.</li>
+        <li><b>Use per active day:</b> all the ink the printer recorded from each cartridge on those days, printing plus head cleans, divided by the number of days. The one-time setup priming and setup test prints are left out.</li>
+        <li><b>Cleans count against every cartridge on that head</b>, so a cartridge you haven't printed with (for example the fluorescent inks) still shows some use.</li>
+        <li><b>Days without printing are skipped</b>, so they don't dilute the average. Cleans on those days aren't counted either, though in these logs ink use on idle days has been close to zero.</li>
+        <li><b>Target:</b> 20% of the cartridge's full capacity, starting from the latest level the printer logged.</li>
+        <li><b>Printing days to 20%</b> = (remaining − 20% of full) ÷ use per active day. The date assumes you print every day from the last reading, so it's the <b>earliest</b> likely date. Printing less often pushes it later.</li>
+        <li>Ink levels are the printer's own calculation (drops fired plus fixed amounts for cleans), not a physical measurement. With only a few active days the forecast is rough and will settle as more logs are added.</li>
+      </ul>
+    </details>
+  </div>
   <div class="controls"><label><input type="checkbox" id="inclSetup"> Include one-time setup ink (initial priming &amp; test prints)</label></div>
   <div class="grid2">
     <div class="card"><h2>Consumption by tank and cause</h2><p class="note">ml used by printing vs maintenance.</p><div class="chart"><canvas id="tankCauseChart"></canvas></div></div>
     <div class="card"><h2>Daily consumption</h2><p class="note">ml per day (your local time), all tanks, by cause.</p><div class="chart"><canvas id="dailyChart"></canvas></div></div>
+  </div>
+  <div class="card" id="primeCard">
+    <h2>Setup ink priming</h2>
+    <p class="note">The first fill at setup fills each ink line before anything prints. The line capacity is the amount the printer logged for filling that line; the rest of each cartridge's setup drop is the printer's fixed allowance for the purge cycles. Both are the printer's own figures, so ink drawn off by syringe during setup isn't counted.</p>
+    <div class="scroll"><table id="primeTable"></table></div>
+    <p class="note" style="margin-top:8px">The Rigid White line is a circulation loop, which is why it's so much larger than the others: about 16.6 ml in the supply line, 20 ml in the filter and 10 ml in the return line.</p>
   </div>
   <div class="card">
     <h2>Planned vs measured ink</h2>
@@ -207,6 +231,23 @@ footer .brand img { height: 30px; width: auto; }
   <div class="grid2">
     <div class="card"><h2>Maintenance summary</h2><div id="maintSummary"></div></div>
     <div class="card"><h2>Power &amp; sleep</h2><div id="powerSummary"></div></div>
+  </div>
+  <div class="card" id="headTimerCard">
+    <h2>Head idle timers <span class="chip" style="font-weight:500;vertical-align:2px">Preliminary · to be confirmed</span></h2>
+    <p class="note">Each print head's <b>Idle</b> timer counts the time the printer isn't working, including sleep, since that head's last standard clean. A 7-day (604,800 s) limit is assumed to trigger moisturizing; that limit doesn't appear in the logs. The estimate assumes the printer stays idle the same share of the time as in the last 48 hours of the logs.</p>
+    <div id="headTimerSummary"></div>
+    <div class="chart" style="margin-top:12px"><canvas id="headTimerChart"></canvas></div>
+    <details style="margin-top:12px"><summary>How the estimate is worked out</summary>
+      <ul class="note" style="margin:8px 0 0;padding-left:18px">
+        <li><b>The 7-day limit is an assumption.</b> No log or setting shows 604,800 s; the card uses it because a 7-day moisturizing cycle is expected for the Omni. If a moisturizing event shows up in a later export, compare its time with this estimate.</li>
+        <li><b>Rate:</b> how much the Idle timer grew during the last 48 hours of logs, divided by 48 hours (e.g. 93% means the printer was idle 93% of that time). The time left to reach 7 days is divided by that share. More printing than in those 48 hours pushes the date later; less brings it closer.</li>
+        <li><b>Snapshots:</b> the printer only logs the timer when it changes state (a print starting, going to sleep, waking). The estimate starts from the last logged value, so it stays valid after the export even though the timer has kept counting.</li>
+        <li><b>Resets aren't predicted.</b> The date assumes that head gets no standard clean before then. A standard clean resets the timer to zero (see below), and the estimate starts over from the next export.</li>
+        <li><b>Asleep counts as idle.</b> Sleep and low power add to the timer; printing, calibration, height measuring and cleaning don't.</li>
+      </ul>
+    </details>
+    <details style="margin-top:8px"><summary>What resets the timers</summary><div id="headTimerResets" class="note" style="margin-top:8px"></div></details>
+    <details style="margin-top:12px"><summary>All head counters and firmware thresholds</summary><div id="headTimerDetail" style="margin-top:8px"></div></details>
   </div>
   <div class="card">
     <div class="controls" id="evFilters"></div>
@@ -233,6 +274,30 @@ footer .brand img { height: 30px; width: auto; }
       <li><b>Per-layer inks</b> (white, flexible white, varnish or colour) come from <code>[GenPd]</code> lines in xTool Studio's slicer log <code>logs/&lt;date&gt;/algo-server/server.log</code>, matched to jobs by task ID. That file lives under the day Studio was started and keeps growing on later days. Without it the layer stack falls back to the slicer settings, which call varnish layers "white"; those jobs are marked <span class="warnchip">⚠</span>.</li>
       <li><b>Tank names</b> are the ones the printer reports for each cartridge. Head 1 holds Cyan, Magenta, Yellow, Black, Varnish and White; head 2 (Dual-UV) holds Fluorescent Yellow, Fluorescent Red, Flexible White and Rigid White. Studio's ink channels map as C→Cyan, M→Magenta, Y→Yellow, K→Black, V→Varnish, W→White, HW→Rigid White and SW→Flexible White (HW checked against measured drops).</li>
       <li><b>Clock</b>: printer timestamps are converted using the detected offset shown above, and everything is shown in this browser's local time.</li>
+    </ul>
+  </div>
+</section>
+
+<section id="changelog">
+  <div class="card">
+    <h2>October 18, 2026 <span class="chip" style="font-weight:500;vertical-align:2px">Update</span></h2>
+    <ul style="margin:8px 0 0;padding-left:18px">
+      <li><b>Head idle timers</b> (Maintenance &amp; events, marked preliminary): each print head's Idle timer over time, with an estimate of when it reaches 7 days based on how much of the last 48 hours the printer sat idle. Includes notes on the assumptions, what has been seen to reset the timers, a list of every reset in your logs with the clean before it, and all of the printer's head counters and clean thresholds.</li>
+      <li><b>Cartridge 20% forecast:</b> a new Overview tile shows how many days of printing until the first cartridge reaches 20%. The Ink usage tab has the forecast for every cartridge, based on average use over your 3 most recent printing days, with an explanation of the calculation.</li>
+      <li><b>Setup ink priming</b> (Ink usage): the capacity of each ink line as logged by the printer, the ink recorded at setup and the purge allowance, plus a note on the Rigid White circulation loop.</li>
+      <li><b>Ink remaining</b> now shows a percentage next to the ml figures.</li>
+      <li>This change log.</li>
+    </ul>
+  </div>
+  <div class="card">
+    <h2>October 17, 2026 <span class="chip" style="font-weight:500;vertical-align:2px">Initial release</span></h2>
+    <ul style="margin:8px 0 0;padding-left:18px">
+      <li>Runs entirely in the browser: drop in xTool Studio log exports and zips of Studio's <code>logs</code> folder. Nothing is uploaded, and overlapping exports are merged with duplicates removed.</li>
+      <li><b>Overview:</b> totals, ink remaining per cartridge with the printer's own cartridge names, where the ink went, lifetime counters and recent activity.</li>
+      <li><b>Print jobs:</b> ink per job by cartridge, ink against print area, layer stacks with white, varnish and colour layers told apart, and per-job details including settings and xTool Studio's ink estimate.</li>
+      <li><b>Ink usage:</b> cartridge levels over time, use by cause and by day, estimated vs recorded ink, and cartridge serial numbers.</li>
+      <li><b>Maintenance &amp; events:</b> a timeline and searchable list of prints, cleans, white-ink stirring, sleep and wake-ups, boots and alarms.</li>
+      <li>CoolBeans Design branding, light and dark themes, and a Python command-line version.</li>
     </ul>
   </div>
 </section>
@@ -338,6 +403,25 @@ function header() {
 }
 
 // ---------------------------------------------------------------- overview
+// Forecast: when each cartridge reaches 20%, from its average use on the 3 most recent active (printing) days
+const FORECAST_DAYS = 3, FORECAST_LEVEL = 0.2;
+const SETUP_SRC = new Set(['clean: ink initial', 'clean: moist initial', 'test print']);
+const localDay = t => { const d = new Date(t); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
+function inkForecast() {
+  const active = [...new Set(realJobs.filter(j => j.start).map(j => localDay(j.start)))].sort();
+  const days = active.slice(-FORECAST_DAYS);
+  const used = {};
+  for (const u of DATA.usage) if (!SETUP_SRC.has(u.src) && days.includes(localDay(u.t))) used[u.tank] = (used[u.tank] || 0) + u.ml;
+  const rows = tankKeys.map(k => {
+    const s = DATA.inkSeries[k], [lastT, remain, full] = s[s.length - 1];
+    const rate = days.length ? (used[k] || 0) / days.length : 0;
+    const toGo = remain - FORECAST_LEVEL * full;
+    const n = toGo <= 0 ? 0 : rate > 0.0005 ? toGo / rate : null;
+    return { k, remain, full, rate, days: n, date: n == null ? null : lastT + n * 86400000 };
+  }).sort((a, b) => (a.days ?? Infinity) - (b.days ?? Infinity));
+  return { days, rows, first: rows.find(r => r.days != null) };
+}
+
 function overview() {
   const cleans = DATA.events.filter(e => e.cat === 'cleaning' && e.kind === 'clean start');
   const printTime = sum(realJobs.map(j => j.dur || 0));
@@ -354,13 +438,16 @@ function overview() {
     [DATA.events.filter(e => e.kind === 'boot').length, 'Boots (power cycles)'],
     [wakes, 'Wake-ups from sleep'], [alarms, 'Alarms'],
   ];
+  const fc = inkForecast();
+  if (fc.first) tiles.push(fc.first.days === 0 ? ['Now', `${tlabel(fc.first.k)} is below 20%`]
+    : [`~${Math.round(fc.first.days)} days`, `of printing until ${tlabel(fc.first.k)} reaches 20% (estimate, see Ink usage)`]);
   $('#tiles').innerHTML = tiles.map(([v, l]) => `<div class="tile"><div class="v">${esc(v)}</div><div class="l">${esc(l)}</div></div>`).join('');
 
   $('#tankLevels').innerHTML = tankKeys.map(k => {
     const s = DATA.inkSeries[k], last = s[s.length - 1], full = last[2], pct = Math.max(0, Math.min(100, last[1] / full * 100));
     return `<div class="tank"><div><span class="sw" style="background:${tcolor(k)}"></span>${esc(tlabel(k))}</div>
       <div class="track"><div class="fill" style="width:${pct}%;background:${tcolor(k)}"></div></div>
-      <div class="num muted" style="text-align:right">${last[1].toFixed(1)} / ${full} ml</div></div>`;
+      <div class="num" style="text-align:right;white-space:nowrap"><b>${Math.round(last[1] / full * 100)}%</b> <span class="muted mlv">· ${last[1].toFixed(1)} / ${full} ml</span></div></div>`;
   }).join('') + (DATA.moistTanks.length ? `<div class="muted" style="font-size:12px;margin-top:8px">Moisturizing fluid: ${DATA.moistTanks.map(m => `${m.cartridges?.[0]?.remainMl?.toFixed(0)} ml`).join(', ')}</div>` : '');
 
   const causes = Object.entries(byCause).sort((a, b) => b[1] - a[1]);
@@ -457,6 +544,30 @@ function jobDetail(j) {
 
 // ---------------------------------------------------------------- ink
 function inkTab() {
+  const fc = inkForecast();
+  $('#forecastCard').style.display = fc.rows.length ? '' : 'none';
+  $('#forecastNote').innerHTML = fc.days.length
+    ? `Based on average use on the ${fc.days.length === 1 ? 'most recent active day' : `${fc.days.length} most recent active days`} (${fc.days.map(d => new Date(d + 'T12:00').toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' })).join(', ')})${fc.days.length < FORECAST_DAYS ? `; the logs don't have ${FORECAST_DAYS} active days yet` : ''}. Printing days count only days you print.`
+    : 'No print jobs in these logs yet, so there is no recent use to project from.';
+  $('#forecastTable').innerHTML = `<thead><tr><th>Cartridge</th><th class="num">Remaining</th><th class="num">Use per active day</th><th class="num">Printing days to 20%</th><th class="num">Earliest date</th></tr></thead><tbody>` +
+    fc.rows.map(r => `<tr><td><span class="sw" style="background:${tcolor(r.k)}"></span>${esc(tlabel(r.k))}</td>
+      <td class="num">${Math.round(r.remain / r.full * 100)}% <span class="muted">· ${r.remain.toFixed(1)} ml</span></td>
+      <td class="num">${r.rate > 0.0005 ? ml(r.rate) + ' ml' : '<span class="muted">not used recently</span>'}</td>
+      <td class="num">${r.days == null ? '—' : r.days === 0 ? 'already below 20%' : '~' + Math.round(r.days)}</td>
+      <td class="num">${r.date && r.days ? new Date(r.date).toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' }) : '—'}</td></tr>`).join('') + '</tbody>';
+  // Setup priming: the line-fill amount the printer logged vs the cartridge's total drop at setup
+  const lineFill = {};
+  for (const f of DATA.lineFills || []) if (!(f.tank in lineFill)) lineFill[f.tank] = f.ml;
+  const primed = {};
+  for (const u of DATA.usage) if (u.src === 'clean: ink initial') primed[u.tank] = (primed[u.tank] || 0) + u.ml;
+  const primeKeys = tankKeys.filter(k => primed[k] > 0.004 || k in lineFill);
+  $('#primeCard').style.display = primeKeys.length ? '' : 'none';
+  if (primeKeys.length) {
+    const tot = sum(primeKeys.map(k => primed[k] || 0));
+    $('#primeTable').innerHTML = `<thead><tr><th>Cartridge</th><th class="num">Line capacity</th><th class="num">Recorded at setup</th><th class="num">Purge allowance</th></tr></thead><tbody>` +
+      primeKeys.map(k => { const cap = lineFill[k], p = primed[k]; return `<tr><td><span class="sw" style="background:${tcolor(k)}"></span>${esc(tlabel(k))}</td><td class="num">${cap != null ? cap + ' ml' : '<span class="muted">not logged</span>'}</td><td class="num">${p != null ? ml(p) + ' ml' : '—'}</td><td class="num">${cap != null && p != null ? ml(p - cap) + ' ml' : '<span class="muted">—</span>'}</td></tr>`; }).join('') +
+      `<tr><td><b>Total</b></td><td class="num">${ml(sum(primeKeys.map(k => lineFill[k] || 0)))} ml</td><td class="num"><b>${ml(tot)} ml</b></td><td></td></tr></tbody>`;
+  }
   const bands = realJobs.filter(j => j.start && j.end);
   const bandPlugin = { id: 'bands', beforeDatasetsDraw(c) { const { ctx, chartArea: a, scales: { x } } = c; ctx.save(); ctx.fillStyle = css('--chip');
     for (const j of bands) { const x0 = x.getPixelForValue(j.start), x1 = x.getPixelForValue(j.end); if (x1 < a.left || x0 > a.right) continue; ctx.fillRect(Math.max(a.left, x0), a.top, Math.max(2, Math.min(a.right, x1) - Math.max(a.left, x0)), a.bottom - a.top); } ctx.restore(); } };
@@ -594,12 +705,86 @@ function aboutTab() {
   $('#dupNote').textContent = st.record ? `Duplicates discarded: ${st.record.duplicates} printer events, ${st.appController.duplicates} controller log records, ${st.desktopDropped} xTool Studio day-logs that were older copies of another.` : '';
 }
 
+// ---------------------------------------------------------------- head timers
+const HEAD_COLOR = { '1': '#2f6fdf', '2': '#3e9a8c' };
+const HEAD_LABEL = { '1': 'Head 1 (CMYK, varnish, white)', '2': 'Head 2 (fluorescent, flexible & rigid white)' };
+const fmtDays = s => s == null ? '—' : `${(s / 86400).toFixed(1)} days`;
+const fmtWhen = t => t == null ? '—' : new Date(t).toLocaleString([], { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+function headTimersTab() {
+  const ht = DATA.headTimers;
+  const heads = ht ? Object.keys(ht.heads).sort() : [];
+  $('#headTimerCard').style.display = heads.length ? '' : 'none';
+  if (!heads.length) return;
+  const target = ht.target;
+  $('#headTimerSummary').innerHTML = heads.map(h => {
+    const e = ht.heads[h].estimate || {};
+    const pct = Math.max(0, Math.min(100, (e.latest || 0) / target * 100));
+    return `<div class="tank" style="grid-template-columns:minmax(150px,240px) 1fr minmax(120px,max-content)">
+      <div><span class="sw" style="background:${HEAD_COLOR[h] || '#999'}"></span>${esc(HEAD_LABEL[h] || 'Head ' + h)}</div>
+      <div class="track" title="${pct.toFixed(0)}% of 7 days"><div class="fill" style="width:${pct}%;background:${HEAD_COLOR[h] || '#999'}"></div></div>
+      <div class="num muted" style="text-align:right">${fmtDays(e.latest)} of 7</div></div>
+      <div class="kv" style="margin:0 0 10px 0">
+        <div>Idle since</div><div>${ht.heads[h].lastReset ? fmtWhen(ht.heads[h].lastReset) : 'before these logs start'}</div>
+        <div>Last reading</div><div>${fmtWhen(e.latestT)} · ${Math.round(e.latest || 0).toLocaleString()} s</div>
+        <div>Idle share, last 48 h</div><div>${e.idleFraction != null ? Math.round(e.idleFraction * 100) + '%' : '—'}</div>
+        <div>Estimated 7 days</div><div><b>${e.remainingSec <= 0 ? 'already reached' : fmtWhen(e.reachT)}</b>${e.remainingSec > 0 ? ` <span class="muted">(${fmtDays(e.remainingSec)} of idle time to go)</span>` : ''}</div>
+      </div>`;
+  }).join('');
+
+  const ds = [];
+  let xMax = 0, xMin = Infinity;
+  for (const h of heads) {
+    const H = ht.heads[h], e = H.estimate || {};
+    const col = HEAD_COLOR[h] || '#999';
+    ds.push({ label: `Head ${h}`, data: H.idle.map(([x, y]) => ({ x, y: y / 86400 })), borderColor: col, backgroundColor: col, pointRadius: 2, borderWidth: 2, tension: 0 });
+    if (e.reachT && e.remainingSec > 0) ds.push({ label: `Head ${h} estimate`, data: [{ x: e.latestT, y: e.latest / 86400 }, { x: e.reachT, y: target / 86400 }], borderColor: col, borderDash: [5, 4], pointRadius: [0, 4], borderWidth: 2 });
+    if (H.idle.length) xMin = Math.min(xMin, H.idle[0][0]);
+    xMax = Math.max(xMax, e.reachT || 0, e.latestT || 0);
+  }
+  ds.push({ label: '7 days', data: [{ x: xMin, y: 7 }, { x: xMax, y: 7 }], borderColor: css('--muted'), borderDash: [2, 3], pointRadius: 0, borderWidth: 1 });
+  mk('#headTimerChart', { type: 'line', data: { datasets: ds },
+    options: { maintainAspectRatio: false, interaction: { mode: 'nearest', intersect: false },
+      plugins: { legend: { labels: { filter: i => !i.text.endsWith('estimate') } }, tooltip: { callbacks: { title: it => fmtWhen(it[0].parsed.x), label: c => ` ${c.dataset.label}: ${c.parsed.y.toFixed(2)} days` } } },
+      scales: { x: { type: 'time', min: xMin, max: xMax + (xMax - xMin) * 0.03 }, y: { min: 0, suggestedMax: 7.5, title: { display: true, text: 'Idle (days)' } } } } });
+
+  // Each drop in a head's Idle readings, paired with the standard (or setup) clean just before it
+  const cleans = DATA.events.filter(e => e.t && e.kind === 'clean start' && e.d.action && e.d.action !== 'flash');
+  const resetRows = [];
+  for (const h of heads) {
+    const pts = ht.heads[h].idle;
+    for (let i = 1; i < pts.length; i++) {
+      if (pts[i][1] >= pts[i - 1][1]) continue;
+      const c = cleans.filter(e => e.t > pts[i - 1][0] - 1 && e.t <= pts[i][0] && (e.d.head === h || e.d.head === 'all')).pop();
+      resetRows.push(`<tr><td>Head ${h}</td><td>${fmtWhen(pts[i][0])}</td><td>${c ? `${esc(c.d.action)} clean on ${c.d.head === 'all' ? 'all heads' : 'head ' + esc(c.d.head)} at ${fmtWhen(c.t)}${c.d.inPrint ? ', during a print' : ''}` : '<span class="muted">no standard clean found in between</span>'}</td></tr>`);
+    }
+  }
+  $('#headTimerResets').innerHTML = `
+    <p style="margin:0 0 6px">Observed in the logs of the Omni O1 this viewer was developed on (October 2026). xTool doesn't document this, and other printers or firmware may behave differently. The table after these notes is worked out from <b>your</b> logs.</p>
+    <ul style="margin:0 0 10px;padding-left:18px">
+      <li><b>Only a standard clean on that head resets its timer</b> (or a clean of all heads, as during setup). Printing doesn't reset it, and neither do the flash cleans every 5 minutes during a print.</li>
+      <li><b>Head 2</b> got a standard clean at the very start of each print that used it after it had been idle more than 4 hours, which matches the <code>uvPrint</code> / <code>uvPrintNorunTimeSwitchMoisturizing</code> threshold of 14,400 s. A print that didn't use head 2 didn't trigger one. So with regular white printing, head 2's timer rarely gets far.</li>
+      <li><b>Head 1</b> didn't get that treatment: several prints started with it idle well over 4 hours and no clean. Its one standard clean after setup came partway through a long print, for a reason the logs don't give. So head 1's timer is the one most likely to reach 7 days.</li>
+      <li>A standard clean also happened once partway through a print on head 2, again without a logged reason.</li>
+    </ul>
+    ${resetRows.length ? `<table><thead><tr><th>Timer</th><th>Reset seen</th><th>Clean just before</th></tr></thead><tbody>${resetRows.join('')}</tbody></table>
+    <p style="margin:6px 0 0">"Reset seen" is the first reading after the drop; the timer itself restarted when the clean or print finished.</p>` : '<p>No resets in these logs.</p>'}`;
+
+  const names = [...new Set(heads.flatMap(h => Object.keys(ht.heads[h].counters)))];
+  const th = Object.entries(ht.thresholds || {});
+  const fmtTh = v => v.split('/').map(x => fmtD(+x)).join(' / ');
+  $('#headTimerDetail').innerHTML = `<table><thead><tr><th>Counter</th>${heads.map(h => `<th class="num">Head ${h}</th>`).join('')}</tr></thead><tbody>` +
+    names.map(n => `<tr><td>${esc(n)}</td>${heads.map(h => { const c = ht.heads[h].counters[n]; return `<td class="num" title="${c ? fmtWhen(c.t) : ''}">${c ? fmtD(c.value) : '—'}</td>`; }).join('')}</tr>`).join('') + '</tbody></table>' +
+    `<p class="note" style="margin:6px 0 12px">Latest value of each counter as the printer last logged it (hover for when). Names are as the firmware writes them.</p>` +
+    (th.length ? `<table><thead><tr><th>Firmware threshold</th><th class="num">Value</th></tr></thead><tbody>${th.map(([k, v]) => `<tr><td><code>${esc(k)}</code></td><td class="num">${esc(fmtTh(v))}</td></tr>`).join('')}</tbody></table>
+      <p class="note" style="margin-top:6px">Reported by the printer at the start of each print and in its settings. Their exact meaning isn't documented.</p>` : '');
+}
+
 // ---------------------------------------------------------------- boot
 function renderAll() {
   if (!DATA) return;
   charts.splice(0).forEach(c => c.destroy());
   chartDefaults();
-  header(); overview(); jobsTab(); inkTab(); eventsTab(); aboutTab();
+  header(); overview(); jobsTab(); inkTab(); eventsTab(); headTimersTab(); aboutTab();
 }
 document.querySelectorAll('#tabs button').forEach(b => b.onclick = () => {
   document.querySelectorAll('#tabs button').forEach(x => x.classList.toggle('on', x === b));
