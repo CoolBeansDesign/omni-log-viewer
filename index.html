@@ -84,6 +84,9 @@ code { font-size: 12px; }
 .btns { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin-top: 14px; }
 .btn { background: var(--accent); color: var(--on-accent); border: 0; border-radius: 8px; padding: 8px 14px; font: inherit; font-weight: 600; cursor: pointer; }
 .btn.alt { background: var(--chip); color: var(--ink); border: 1px solid var(--line); }
+.price-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 8px 16px; }
+.price-grid label { display: flex; justify-content: space-between; align-items: center; gap: 8px; font-size: 13px; }
+.price-grid input { width: 90px; font: inherit; padding: 4px 6px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--ink); text-align: right; }
 #progress { display: none; margin-top: 16px; }
 #progress .track { height: 8px; background: var(--chip); border-radius: 4px; overflow: hidden; }
 #progress .fill { height: 100%; width: 0; background: var(--accent); transition: width .1s; }
@@ -171,6 +174,13 @@ footer .brand img { height: 30px; width: auto; }
     <div class="card"><h2>Ink vs print area</h2><p class="note">Total ml per job against printed area (cm²). Bubble size = layer count.</p><div class="chart"><canvas id="areaChart"></canvas></div></div>
     <div class="card"><h2>Layer configurations</h2><p class="note">Layer stacks used, counted across jobs.</p><div class="chart"><canvas id="layerChart"></canvas></div></div>
   </div>
+  <div class="card" id="priceCard">
+    <details id="priceDetails"><summary><b>Ink prices</b> <span class="muted" id="priceSummary"></span></summary>
+      <p class="note" style="margin:10px 0">Price per cartridge, as in xTool Studio's ink price settings. Cost per ml is the cartridge price divided by its capacity (125 ml or 290 ml). Changes are saved in this browser.</p>
+      <div id="priceInputs" class="price-grid"></div>
+      <div style="margin-top:10px;display:flex;gap:8px;align-items:center"><button class="btn alt" id="priceReset">Reset</button><span class="muted" style="font-size:12px" id="priceSource"></span></div>
+    </details>
+  </div>
   <div class="card">
     <div class="controls">
       <h2 style="margin:0 12px 0 0">All print jobs</h2>
@@ -178,6 +188,16 @@ footer .brand img { height: 30px; width: auto; }
       <span class="muted" style="font-size:12px">Click a row for details.</span>
     </div>
     <div class="scroll"><table id="jobTable"></table></div>
+  </div>
+  <div class="card" id="nonPrintCard">
+    <div class="controls">
+      <h2 style="margin:0 12px 0 0">Non-print ink use</h2>
+      <label><input type="checkbox" id="npSetup" checked> Include one-time setup ink</label>
+    </div>
+    <p class="note">Ink the printer recorded for everything other than printing: head cleans (including the ones a print starts with), deep and scheduled cleans, switching a head between ink and moisturizing fluid, setup priming and test prints. Together with the print jobs above this accounts for all the ink used. <span id="npCoverage"></span></p>
+    <div id="npTotals" class="kv" style="margin-bottom:10px"></div>
+    <div class="scroll" style="max-height:260px;margin-bottom:12px"><table id="npSummary"></table></div>
+    <details><summary>Every event</summary><div class="scroll" style="margin-top:8px"><table id="npTable"></table></div></details>
   </div>
 </section>
 
@@ -280,6 +300,14 @@ footer .brand img { height: 30px; width: auto; }
 </section>
 
 <section id="changelog">
+  <div class="card">
+    <h2>October 22, 2026 <span class="chip" style="font-weight:500;vertical-align:2px">Ink costs</span></h2>
+    <ul style="margin:8px 0 0;padding-left:18px">
+      <li><b>Cost per print job:</b> a Cost column in All print jobs, and the cost of each job's printing and head-clean ink in its details.</li>
+      <li><b>Non-print ink use</b> (Print jobs tab): every non-printing use of ink, with how much it used and what it cost. That covers head cleans, deep and scheduled cleans, switching a head between ink and moisturizing fluid, setup priming and test prints. It shows totals by cause, the share of ink cost that isn't printing, and a sortable list of every event.</li>
+      <li><b>Ink prices:</b> an editable panel with the price per cartridge for each ink, as set in xTool Studio. It starts with Studio's default prices and remembers your edits in the browser. The Python version reads the prices set in xTool Studio on that computer.</li>
+    </ul>
+  </div>
   <div class="card">
     <h2>October 18, 2026 <span class="chip" style="font-weight:500;vertical-align:2px">Omni O1 UV/DT support</span></h2>
     <ul style="margin:8px 0 0;padding-left:18px">
@@ -514,8 +542,111 @@ function jobsTab() {
   mk('#layerChart', { type: 'bar', data: { labels: st.map(s => s[0]), datasets: [{ data: st.map(s => s[1]), backgroundColor: '#8b78d0', maxBarThickness: 24 }] },
     options: { indexAxis: 'y', maintainAspectRatio: false, plugins: { legend: { display: false }, tooltip: { callbacks: { label: c => ` ${c.raw} element(s)` } } }, scales: { x: { ticks: { precision: 0 }, title: { display: true, text: 'Elements printed' } }, y: { grid: { display: false } } } } });
 
+  loadPrices(); renderPrices();
   renderJobTable();
   $('#showTests').onchange = renderJobTable;
+  renderNonPrint();
+  $('#npSetup').onchange = renderNonPrint;
+}
+
+// ---------------------------------------------------------------- ink prices
+// xTool Studio's ink price settings (per cartridge). The Python version reads the
+// user's own values into DATA.prices; otherwise these defaults, which Studio seeds, are used.
+const PRICE_GROUPS = [
+  ['colorInkPrice', 'UV colour (C, M, Y, K)', ['UC', 'UM', 'UY', 'UK']],
+  ['whiteInkPrice', 'UV white', ['UW']],
+  ['varnishInkPrice', 'Varnish', ['UV']],
+  ['hardWhiteInkPrice', 'Rigid (hard) white', ['UD']],
+  ['softWhiteInkPrice', 'Flexible (soft) white', ['US']],
+  ['fluorRedInkPrice', 'Fluorescent red', ['UR']],
+  ['fluorYellowInkPrice', 'Fluorescent yellow', ['UH']],
+  ['dtgColorInkPrice', 'DTG colour (C, M, Y, K)', ['DC', 'DM', 'DY', 'DK']],
+  ['dtgWhiteInkPrice', 'DTG white', ['DS']],
+];
+const DEFAULT_PRICES = { currency: 'USD($)', source: "xTool Studio's default prices",
+  perCartridge: { colorInkPrice: 19.99, whiteInkPrice: 19.99, varnishInkPrice: 22.99, hardWhiteInkPrice: 34.99, softWhiteInkPrice: 34.99,
+                  fluorRedInkPrice: 28.99, fluorYellowInkPrice: 28.99, dtgColorInkPrice: 18.99, dtgWhiteInkPrice: 31.99 } };
+let PRICES = DEFAULT_PRICES;
+function loadPrices() {
+  let saved = null;
+  try { saved = JSON.parse(localStorage.getItem('omniInkPrices') || 'null'); } catch (e) {}
+  const base = DATA.prices || DEFAULT_PRICES;
+  PRICES = saved ? { ...base, currency: saved.currency ?? base.currency, perCartridge: { ...base.perCartridge, ...saved.perCartridge }, source: 'your edits in this browser' } : base;
+}
+const priceSymbol = () => (PRICES.currency.match(/\(([^)]+)\)/) || [])[1] || PRICES.currency || '';
+const money = v => v == null ? '—' : priceSymbol() + (v > 0 && v < 0.01 ? v.toFixed(3) : v.toFixed(2));
+const groupOf = code => PRICE_GROUPS.find(g => g[2].includes(code));
+const perMl = k => { const g = groupOf(tcode(k)), s = DATA.inkSeries[k]; const full = s && s[s.length - 1][2]; return g && full > 0 ? (PRICES.perCartridge[g[0]] || 0) / full : 0; };
+const inkCost = used => sum(Object.entries(used || {}).map(([k, v]) => v * perMl(k)));
+function renderPrices() {
+  const groups = PRICE_GROUPS.filter(g => tankKeys.some(k => g[2].includes(tcode(k))));
+  $('#priceSummary').textContent = `· ${PRICES.currency} · ${groups.map(g => `${g[1].replace(/ \(.*\)/, '')} ${priceSymbol()}${(+PRICES.perCartridge[g[0]] || 0).toFixed(2)}`).join(' · ')}`;
+  $('#priceSource').textContent = `Using ${PRICES.source}.`;
+  $('#priceInputs').innerHTML = `<label>Currency <input id="priceCurrency" value="${esc(PRICES.currency)}" style="width:110px;text-align:left"></label>` +
+    groups.map(g => `<label>${esc(g[1])} <input type="number" min="0" step="0.01" data-g="${g[0]}" value="${PRICES.perCartridge[g[0]] ?? ''}"></label>`).join('');
+  const save = () => {
+    const pc = {};
+    $('#priceInputs').querySelectorAll('input[data-g]').forEach(i => { pc[i.dataset.g] = parseFloat(i.value) || 0; });
+    try { localStorage.setItem('omniInkPrices', JSON.stringify({ currency: $('#priceCurrency').value, perCartridge: pc })); } catch (e) {}
+    loadPrices(); $('#priceSource').textContent = `Using ${PRICES.source}.`;
+    renderJobTable(); renderNonPrint();
+    $('#priceSummary').textContent = `· ${PRICES.currency} · ${groups.map(g => `${g[1].replace(/ \(.*\)/, '')} ${priceSymbol()}${(+PRICES.perCartridge[g[0]] || 0).toFixed(2)}`).join(' · ')}`;
+  };
+  $('#priceInputs').onchange = save;
+  $('#priceReset').onclick = () => { try { localStorage.removeItem('omniInkPrices'); } catch (e) {} loadPrices(); renderPrices(); renderJobTable(); renderNonPrint(); };
+}
+
+// ---------------------------------------------------------------- non-print ink use
+// Every ink drop the printer recorded that wasn't printing, grouped into one row per event
+// (all cartridges change in the same snapshot, within a few seconds).
+function nonPrintEvents() {
+  const us = DATA.usage.filter(u => u.src !== 'print' && ($('#npSetup').checked || !SETUP_SRC.has(u.src))).sort((a, b) => a.t - b.t);
+  const out = [];
+  for (const u of us) {
+    const last = out[out.length - 1];
+    if (last && last.src === u.src && u.t - last.t < 5000) { last.used[u.tank] = (last.used[u.tank] || 0) + u.ml; continue; }
+    out.push({ t: u.t, src: u.src, job: u.job, used: { [u.tank]: u.ml } });
+  }
+  const cleans = DATA.events.filter(e => e.t && e.kind === 'clean start');
+  for (const r of out) {
+    r.ml = sum(Object.values(r.used)); r.cost = inkCost(r.used);
+    const action = r.src.startsWith('clean: ') ? r.src.slice(7) : null;
+    r.clean = action ? cleans.filter(e => e.t <= r.t && e.d.action === action).pop() : null;
+  }
+  return out;
+}
+let npSort = { k: 't', dir: -1 };
+function renderNonPrint() {
+  const rows = nonPrintEvents();
+  $('#nonPrintCard').style.display = DATA.usage.length ? '' : 'none';
+  const allCost = inkCost(DATA.usage.reduce((a, u) => (a[u.tank] = (a[u.tank] || 0) + u.ml, a), {}));
+  const printCost = inkCost(DATA.usage.filter(u => u.src === 'print').reduce((a, u) => (a[u.tank] = (a[u.tank] || 0) + u.ml, a), {}));
+  const npMl = sum(rows.map(r => r.ml)), npCost = sum(rows.map(r => r.cost));
+  $('#npCoverage').textContent = DATA.usage.length ? `Ink readings in these logs start ${fmtT(inkDataFrom())}.` : '';
+  $('#npTotals').innerHTML = `<div>Non-print ink</div><div><b>${ml(npMl)} ml · ${money(npCost)}</b> <span class="muted">(${rows.length} events)</span></div>
+    <div>Printing ink</div><div>${money(printCost)}</div>
+    <div>Non-print share of ink cost</div><div>${allCost > 0 ? Math.round(npCost / (npCost + printCost) * 100) + '%' : '—'}</div>`;
+  const by = {};
+  for (const r of rows) { const b = by[r.src] = by[r.src] || { n: 0, ml: 0, cost: 0 }; b.n++; b.ml += r.ml; b.cost += r.cost; }
+  $('#npSummary').innerHTML = `<thead><tr><th>Cause</th><th class="num">Events</th><th class="num">Ink</th><th class="num">Cost</th><th class="num">Per event</th></tr></thead><tbody>` +
+    Object.entries(by).sort((a, b) => b[1].cost - a[1].cost).map(([s, b]) => `<tr><td>${esc(causeLabel(s))}</td><td class="num">${b.n}</td><td class="num">${ml(b.ml)} ml</td><td class="num"><b>${money(b.cost)}</b></td><td class="num muted">${money(b.cost / b.n)}</td></tr>`).join('') + '</tbody>';
+  const cols = [
+    ['t', 'When', r => fmtT(r.t), r => r.t],
+    ['src', 'Event', r => esc(causeLabel(r.src)) + (r.clean?.d?.head ? ` <span class="muted">· head ${esc(r.clean.d.head)}</span>` : ''), r => causeLabel(r.src)],
+    ['job', 'During print', r => r.job != null && !jobs[r.job]?.isTest ? esc(jobs[r.job]?.name || jobs[r.job]?.taskId || '') : '', r => r.job ?? -1],
+    ['ml', 'Ink (ml)', r => `<div style="display:flex;gap:8px;align-items:center;justify-content:flex-end"><span>${ml(r.ml)}</span>${usageBar(r.used)}</div>`, r => r.ml, 1],
+    ['cost', 'Cost', r => money(r.cost), r => r.cost, 1],
+  ];
+  const col = cols.find(c => c[0] === npSort.k);
+  rows.sort((a, b) => { const x = col[3](a), y = col[3](b); return (x > y ? 1 : x < y ? -1 : 0) * npSort.dir; });
+  const tb = $('#npTable');
+  tb.innerHTML = `<thead><tr>${cols.map(c => `<th data-k="${c[0]}" class="${c[4] ? 'num' : ''}">${c[1]}${npSort.k === c[0] ? (npSort.dir > 0 ? ' ▲' : ' ▼') : ''}</th>`).join('')}</tr></thead><tbody>` +
+    rows.map(r => `<tr>${cols.map(c => `<td class="${c[4] ? 'num' : ''}">${c[2](r)}</td>`).join('')}</tr>`).join('') + '</tbody>';
+  tb.querySelectorAll('th').forEach(th => th.onclick = () => { npSort = { k: th.dataset.k, dir: npSort.k === th.dataset.k ? -npSort.dir : -1 }; renderNonPrint(); });
+}
+function usageBar(used) {
+  const tot = sum(Object.values(used)); if (!tot) return '<div class="bar"></div>';
+  return `<div class="bar" title="${tankKeys.filter(k => used[k] > 0.004).map(k => `${tlabel(k)} ${ml(used[k])}`).join(', ')}">${tankKeys.map(k => used[k] > 0.004 ? `<span style="width:${used[k] / tot * 100}%;background:${tcolor(k)}"></span>` : '').join('')}</div>`;
 }
 
 let jobSort = { k: 'start', dir: -1 };
@@ -530,6 +661,7 @@ function renderJobTable() {
     ['layers', 'Layers', j => (chips(layerSummary(j)) || '<span class="muted">—</span>') + (['partial', 'settings'].includes(inkCoverage(j)) ? ` <span class="warnchip" title="${esc(NO_SLICER)}">⚠</span>` : ''), j => sum(Object.values(layerSummary(j)))],
     ['thick', 'Thickness', j => { const t = (j.elements || []).map(e => e.printThickness).filter(x => x); return t.length ? Math.max(...t) + ' mm' : '—'; }, j => Math.max(0, ...(j.elements || []).map(e => e.printThickness || 0)), 1],
     ['ink', 'Ink (ml)', j => hasInkData(j) ? `<div style="display:flex;gap:8px;align-items:center;justify-content:flex-end"><span>${ml(jobTotal(j))}</span>${inkBar(j)}</div>` : '<span class="muted" title="Before the ink readings in these logs begin">—</span>', j => hasInkData(j) ? jobTotal(j) : -1, 1],
+    ['cost', 'Cost', j => hasInkData(j) ? money(inkCost(j.inkUsed)) : '<span class="muted">—</span>', j => hasInkData(j) ? inkCost(j.inkUsed) : -1, 1],
     ['cleans', 'Cleans', j => j.cleans.length ? `${j.cleans.length}${jobClean(j) > 0.004 ? ` <span class="muted">(${ml(jobClean(j))} ml)</span>` : ''}` : '', j => j.cleans.length, 1],
   ];
   const col = cols.find(c => c[0] === jobSort.k);
@@ -563,8 +695,8 @@ function jobDetail(j) {
     ${s.dpi ? `<div>Resolution</div><div>${esc(s.dpi)} dpi${s.highSpeedPrint === 'true' ? ', high speed' : ''}</div>` : ''}
     ${s.uvLightPower ? `<div>UV power / speed</div><div>${esc(s.uvLightPower)} / ${esc(s.speed)}</div>` : ''}
     ${s.inkSavingMode ? `<div>Ink saving / halftone</div><div>${esc(s.inkSavingMode)} / ${esc(s.halfToningType || '')}</div>` : ''}
-    <div>Measured ink (printing)</div><div>${ink || '<span class="muted">none recorded</span>'}</div>
-    ${jobClean(j) > 0.004 ? `<div>Head clean during job</div><div>${tankKeys.filter(k => j.inkClean[k] > 0.004).map(k => `<span class="chip"><span class="sw" style="background:${tcolor(k)}"></span>${esc(tlabel(k))} ${ml(j.inkClean[k])} ml</span>`).join('')}</div>` : ''}
+    <div>Ink (printing)</div><div>${ink || '<span class="muted">none recorded</span>'}${ink ? ` <b>${money(inkCost(j.inkUsed))}</b>` : ''}</div>
+    ${jobClean(j) > 0.004 ? `<div>Head clean during job</div><div>${tankKeys.filter(k => j.inkClean[k] > 0.004).map(k => `<span class="chip"><span class="sw" style="background:${tcolor(k)}"></span>${esc(tlabel(k))} ${ml(j.inkClean[k])} ml</span>`).join('')} <b>${money(inkCost(j.inkClean))}</b> <span class="muted">(listed under Non-print ink use)</span></div>` : ''}
     ${plan ? `<div>Studio estimate</div><div>${plan}</div>` : ''}
     <div>In-print events</div><div>${j.cleans.length ? chips(j.cleans.reduce((a, c) => (a['clean: ' + c] = (a['clean: ' + c] || 0) + 1, a), {})) : 'no cleans'}${j.pauses ? ` <span class="chip">paused × ${j.pauses}</span>` : ''}${j.alarms.length ? ` <span class="chip" style="color:var(--crit)">alarms: ${esc(j.alarms.join(', '))}</span>` : ''}</div>
   </div>` + (el ? `<table><thead><tr><th>#</th><th>Type</th><th>Ink mode</th><th>Layer stack</th><th class="num">Size (mm)</th><th class="num">Thickness</th><th class="num">Layer mm</th><th>White / varnish type</th></tr></thead><tbody>${el}</tbody></table>

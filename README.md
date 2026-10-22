@@ -51,7 +51,7 @@ You can also download this project and open `index.html` straight from your disk
 ## Reading the report
 
 - **Overview**: totals, current cartridge levels, where the ink went, lifetime counters, recent activity.
-- **Print jobs**: ink per job and per cartridge, print area vs ink, layer stacks. Click a job for its settings, layers and in-print cleans.
+- **Print jobs**: ink per job and per cartridge, print area vs ink, layer stacks. Click a job for its settings, layers and in-print cleans. Each job's ink cost, a Non-print ink use table (cleans, head switches, setup priming and test prints, with cost), and an Ink prices panel to set your price per cartridge.
 - **Ink usage**: cartridge levels over time, use by cause and by day, xTool Studio's estimate vs what was measured, cartridge serials.
 - **Maintenance & events**: a timeline and a searchable list of everything the printer logged.
 - **About the data**: which files were read, the clock offsets that were detected, and which jobs are missing per-layer ink detail.

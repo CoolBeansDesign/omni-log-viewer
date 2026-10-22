@@ -21,6 +21,7 @@ import webbrowser
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import omni_parser  # noqa: E402
+import studio_prices  # noqa: E402
 
 # The same page renders the report here and in the browser-only version.
 TEMPLATE = os.path.join(HERE, 'index.html')
@@ -35,7 +36,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('inputs', nargs='*', help=f'folders or files (default: {DEFAULT_LOG_DIR})')
     ap.add_argument('-o', '--output', default=os.path.join(HERE, 'omni_report.html'))
-    ap.add_argument('--no-local', action='store_true', help="don't include this Mac's live xTool Studio logs")
+    ap.add_argument('--no-local', action='store_true', help="don't read this computer's xTool Studio logs or ink prices")
     ap.add_argument('--json', help='also write the parsed data as JSON')
     ap.add_argument('--no-open', action='store_true', help="don't open the report in a browser")
     args = ap.parse_args()
@@ -49,6 +50,8 @@ def main():
         sys.exit(f'No .gz or .zip log files found in: {", ".join(inputs)}')
     data = omni_parser.analyze(sources)
     data['sources'] = [s['file'] for s in data['stats']['sources']]
+    # ink prices as set in xTool Studio on this computer (for the cost columns)
+    data['prices'] = None if args.no_local else studio_prices.read_prices()
 
     payload = json.dumps(data, separators=(',', ':'), default=str).replace('</', '<\\/')
     with open(TEMPLATE, encoding='utf-8') as f:
