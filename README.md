@@ -10,6 +10,8 @@ It reads the log files that xTool Studio can export, and turns them into an inte
 
 **Open the viewer:** https://coolbeansdesign.github.io/omni-log-viewer/
 
+**Watch the walkthrough video:** [Omni Log Viewer walkthrough on YouTube](https://www.youtube.com/watch?v=CLJeZrgDYWg). It covers collecting the logs, loading them and reading the report.
+
 > Not affiliated with, endorsed by or supported by xTool. "xTool", "xTool Studio" and "Omni" are xTool's names for their products.
 
 ## Your logs stay on your computer
