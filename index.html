@@ -240,7 +240,29 @@ footer .brand img { height: 30px; width: auto; }
     <p class="note">xTool Studio's pre-print estimate (computeInkVolume, picolitres → ml) vs the printer's measured drop. Only jobs sent from the computer whose logs are included.</p>
     <div class="scroll"><table id="planTable"></table></div>
   </div>
-  <div class="card"><h2>Cartridges</h2><p class="note">From the printer's inkConsumption.json. The first serial in each slot is the installed cartridge.</p><div class="scroll"><table id="cartTable"></table></div></div>
+  <div class="card" id="cartCard">
+    <h2>Cartridges</h2>
+    <p class="note">What the printer reports for each installed cartridge: its serial number, what its chip says, the printer's calculated ink left, and its separate level-sensor reading. The checks look for things that don't add up. They can flag a cartridge that looks odd, but they can't prove a cartridge is genuine or unmodified (see "About these checks").</p>
+    <div class="scroll"><table id="cartTable"></table></div>
+    <div class="scroll" style="margin-top:12px"><table id="moistTable"></table></div>
+    <p class="note" id="moistNote" style="margin-top:6px">Moisturizing fluid is tracked differently from ink. Its count only drops by fixed amounts at set moments: 35 ml per cartridge when the lines were first filled at setup, and 12 ml each time a head is switched to moisturizing fluid. Nothing is deducted for sleeping or routine capping. Its level-sensor reading barely moves (a few points either way, with no link to sleep, wake-ups or cleans), often sits at or above the cartridge's threshold without the printer flagging it low, and on DTG moisturizing fluid reads 0. So the reading is shown raw, isn't compared with the threshold, and isn't charted.</p>
+    <h3 style="font-size:14px;margin:18px 0 4px">Level sensor</h3>
+    <p class="note">The level-sensor reading as a share of each ink cartridge's low-ink threshold. The printer flags a cartridge as low when the reading reaches its threshold (100%). Only ink cartridges with a working sensor reading are shown; moisturizing fluid is left out (see above).</p>
+    <div class="chart"><canvas id="sensorChart"></canvas></div>
+    <details style="margin-top:12px"><summary>Other serial numbers this printer has recorded</summary><div class="scroll" style="margin-top:8px"><table id="cartHistory"></table></div></details>
+    <details style="margin-top:8px"><summary>About these checks</summary>
+      <ul class="note" style="margin:8px 0 0;padding-left:18px">
+        <li><b>Serial format:</b> xTool serials look like <code>A0000 T U C 0 BH05 0222</code>: <code>U</code> (UV) or <code>D</code> (DTG), a letter for the ink (C, M, Y, K, V, W, H fluorescent yellow, R fluorescent red, S flexible white, D rigid white, F moisturizing fluid), what appears to be a batch or date code, then a sequence number. A serial that doesn't fit this pattern is flagged.</li>
+        <li><b>Right ink for the slot:</b> the ink in the serial is compared with what that slot holds on this model.</li>
+        <li><b>Same serial in two slots:</b> every cartridge should have its own serial. The same one in two places suggests a copied chip.</li>
+        <li><b>Ink count went up:</b> the printer keeps a running count of ink left for each serial. It should only go down. A rise suggests the count was reset or the cartridge was refilled and re-programmed.</li>
+        <li><b>Chip details changed:</b> capacity, hardware version, calibration value and low-ink threshold should stay the same for a given serial.</li>
+        <li><b>Sensor and count disagree:</b> on ink cartridges with a working level sensor, the printer's low-ink flag while the count still shows plenty, or a near-empty count while the sensor is far from its low threshold.</li>
+        <li><b>Limits:</b> these values are what the cartridge chip and the printer report, and a copied or modified chip could report them exactly. The checks catch inconsistencies; they don't prove a cartridge is genuine. Normal ranges for the calibration values and thresholds aren't known yet, so unusual values aren't flagged on their own.</li>
+        <li><b>Serials recorded but not installed:</b> on a new printer these are usually cartridges used for testing at the factory: nearly full, from older batches, and sometimes for a different ink than the slot holds.</li>
+      </ul>
+    </details>
+  </div>
 </section>
 
 <section id="events">
@@ -300,6 +322,15 @@ footer .brand img { height: 30px; width: auto; }
 </section>
 
 <section id="changelog">
+  <div class="card">
+    <h2>November 1, 2026 <span class="chip" style="font-weight:500;vertical-align:2px">Cartridge details and checks</span></h2>
+    <ul style="margin:8px 0 0;padding-left:18px">
+      <li><b>Cartridges</b> (Ink usage tab) now shows what the printer reports for every installed ink and moisturizing-fluid cartridge: the serial number and what it encodes, capacity, the printer's calculated ink left, the level-sensor reading against the cartridge's low-ink threshold, the chip's hardware version and calibration values, and when it was first seen.</li>
+      <li><b>Consistency checks</b> for each cartridge: serial format, the right ink for the slot, the same serial in two slots, the ink count going up (and whether the level sensor agrees), chip details changing, and the low-ink flag disagreeing with the count. They flag things that don't add up; they can't prove a cartridge is genuine.</li>
+      <li><b>Level sensor chart:</b> each cartridge's sensor reading over time as a share of its low-ink threshold.</li>
+      <li><b>Other serials:</b> serial numbers the printer has recorded but that aren't installed, with notes such as "likely factory testing".</li>
+    </ul>
+  </div>
   <div class="card">
     <h2>October 22, 2026 <span class="chip" style="font-weight:500;vertical-align:2px">Ink costs</span></h2>
     <ul style="margin:8px 0 0;padding-left:18px">
@@ -760,10 +791,110 @@ function inkTab() {
     pj.map(j => `<tr><td>${fmtT(j.start)} · ${esc(j.name || j.taskId)}</td>${chans.map(c => { const k = tankKeys.find(k => tcode(k) === CHANNEL_TANK[c]); return `<td class="num">${ml(j.inkPlanMl[c])}</td><td class="num muted">${k ? ml(j.inkUsed?.[k]) : '?'}</td>`; }).join('')}</tr>`).join('') + '</tbody>'
     : '<tr><td class="muted">No jobs with Studio estimates.</td></tr>';
 
-  const rows = [];
-  for (const k of Object.keys(DATA.tanks).sort()) for (const [i, c] of (DATA.tanks[k].cartridges || []).entries())
-    rows.push(`<tr><td><span class="sw" style="background:${tcolor(k)}"></span>${esc(tlabel(k))}</td><td>${i === 0 ? 'installed' : 'history ' + i}</td><td><code>${esc(c.serial)}</code></td><td class="num">${c.remainMl.toFixed(2)} ml</td></tr>`);
-  $('#cartTable').innerHTML = `<thead><tr><th>Tank</th><th></th><th>Serial</th><th class="num">Remaining</th></tr></thead><tbody>${rows.join('')}</tbody>`;
+  cartridgesCard();
+}
+
+// ---------------------------------------------------------------- cartridges
+const SERIAL_RX = /^A0000T([UD])([A-Z])0([A-Z]{2}\d{2})(\d{4})$/;
+const SERIAL_INK = { C: 'Cyan', M: 'Magenta', Y: 'Yellow', K: 'Black', V: 'Varnish', W: 'White', H: 'Fluorescent yellow', R: 'Fluorescent red', S: 'Flexible white', D: 'Rigid white', F: 'Moisturizing fluid' };
+const SLOT_EXPECT = {
+  'Omni O1 Dual-UV': { '0-0': 'UC', '0-1': 'UM', '0-2': 'UY', '0-3': 'UK', '0-4': 'UV', '0-5': 'UW', '1-0': 'UH', '1-1': 'UR', '1-2': 'US', '1-4': 'UD' },
+  'Omni O1 UV/DT': { '0-0': 'UC', '0-1': 'UM', '0-2': 'UY', '0-3': 'UK', '0-4': 'UV', '0-5': 'UW', '1-0': 'DC', '1-1': 'DM', '1-2': 'DY', '1-3': 'DK', '1-4': 'DS' },
+};
+function decodeSerial(s) {
+  const m = SERIAL_RX.exec(s || '');
+  if (!m) return null;
+  return { family: m[1] === 'U' ? 'UV' : 'DTG', ink: m[1] === 'D' && m[2] === 'S' ? 'White' : (SERIAL_INK[m[2]] || m[2]), code: m[1] + m[2], batch: m[3], seq: m[4] };
+}
+const serialHtml = s => { const d = decodeSerial(s); return `<code>${esc(s)}</code>${d ? `<div class="muted" style="font-size:12px">${d.family} ${esc(d.ink.toLowerCase())} · batch ${esc(d.batch)} · no. ${esc(d.seq)}</div>` : ''}`; };
+const cartLabel = k => k.startsWith('m') ? `Moisturizing fluid ${+k.slice(1) + 1}` : tlabel(k);
+const cartColor = k => k.startsWith('m') ? '#9fb7c9' : tcolor(k);
+// The consistency checks for one cartridge record; returns a list of problems (empty = all fine)
+function cartChecks(r, recs, chips) {
+  const out = [];
+  const d = decodeSerial(r.serial);
+  if (!d) out.push('Serial doesn\'t match the usual format');
+  const expect = r.kind === 'moist' ? null : SLOT_EXPECT[DATA.model?.name]?.[r.tank];
+  if (d && expect && d.code !== expect) out.push(`Serial is for ${d.family} ${d.ink.toLowerCase()}, but this slot holds ${TANK_LABEL[expect] || expect}`);
+  if (d && r.kind === 'moist' && d.code[1] !== 'F') out.push('Serial isn\'t for moisturizing fluid');
+  const elsewhere = [...new Set(recs.filter(x => x.serial === r.serial && x.tank !== r.tank).map(x => cartLabel(x.tank)))];
+  if (elsewhere.length) out.push(`Same serial also recorded in: ${elsewhere.join(', ')}`);
+  for (const u of r.remainUps) {
+    const before = r.sensor.filter(p => p[0] < u.t).pop(), at = r.sensor.find(p => p[0] === u.t);
+    const sens = before && at && before[1] > 0 && at[1] < before[1] - 5 ? `, and at the same time the level sensor dropped from ${before[1]} to ${at[1]} (reads fuller), which suggests the cartridge was refilled` : '';
+    out.push(`Ink count went up from ${ml(u.from)} to ${ml(u.to)} ml on ${fmtT(u.t)}${sens}`);
+  }
+  if (r.fullMl.length > 1) out.push(`Capacity changed: ${r.fullMl.join(' → ')} ml`);
+  const cvc = Object.entries(r.calibValueCount || {}).sort((a, b) => b[1] - a[1]);
+  if (cvc.length > 1 && cvc.slice(1).some(([, n]) => n > 1)) out.push(`Calibration value changed: ${cvc.map(([v, n]) => `${v} (${n} report${n === 1 ? '' : 's'})`).join(', ')}`);
+  const mine = chips.filter(c => c.serial === r.serial);
+  const hws = [...new Set(mine.map(c => c.hw))], ths = [...new Set(mine.map(c => c.threshold))];
+  if (hws.length > 1) out.push(`Hardware version changed: ${hws.join(' → ')}`);
+  if (ths.length > 1) out.push(`Low-ink threshold changed: ${ths.join(' → ')}`);
+  const full = r.fullMl[r.fullMl.length - 1], pct = full > 0 && r.remainLast != null ? r.remainLast / full * 100 : null;
+  const sensorWorks = r.sensor.some(p => p[1] > 0), th = ths[ths.length - 1], lv = r.sensor.length ? r.sensor[r.sensor.length - 1][1] : null;
+  for (const [ft, frem] of r.lowFlags || []) if (full > 0 && frem != null && frem / full > 0.4) out.push(`Printer flagged low ink on ${fmtT(ft)} while its count showed ${Math.round(frem / full * 100)}%`);
+  if (r.kind === 'ink' && sensorWorks && th && pct != null && pct < 25 && lv != null && lv < th / 2) out.push(`Count is down to ${Math.round(pct)}% but the level sensor is far from its low threshold (${lv} of ${th})`);
+  return out;
+}
+function cartridgesCard() {
+  const C = DATA.cartridges || { records: [], chips: [] };
+  const recs = C.records, chips = C.chips;
+  $('#cartCard').style.display = recs.length || tankKeys.length ? '' : 'none';
+  // the installed cartridge in each slot = the record seen most recently there
+  const latest = {};
+  for (const r of recs) if (!latest[r.tank] || r.lastT > latest[r.tank].lastT) latest[r.tank] = r;
+  const chipOf = r => chips.filter(c => c.serial === r.serial && c.tank === r.tank).pop();
+  const row = r => {
+    const k = r.tank, full = r.fullMl[r.fullMl.length - 1], pct = full > 0 ? r.remainLast / full * 100 : null;
+    const chip = chipOf(r), lv = r.sensor.length ? r.sensor[r.sensor.length - 1][1] : null, sensorWorks = r.sensor.some(p => p[1] > 0);
+    const issues = cartChecks(r, recs, chips);
+    return `<tr><td><span class="sw" style="background:${cartColor(k)}"></span>${esc(cartLabel(k))}${r.name && r.kind === 'moist' ? '' : ''}</td>
+      <td>${serialHtml(r.serial)}</td>
+      <td class="num">${full != null ? full + ' ml' : '—'}</td>
+      <td class="num">${pct != null ? `${Math.round(pct)}% <span class="muted">· ${r.remainLast.toFixed(1)} ml</span>` : '—'}</td>
+      <td class="num">${sensorWorks ? (r.kind === 'moist' ? `<span title="Raw reading. The printer doesn't appear to compare it with this cartridge's threshold (${chip ? chip.threshold : '?'}).">${lv}</span>` : `${lv}${chip ? ` <span class="muted">/ ${chip.threshold}</span>` : ''}`) : '<span class="muted">no reading</span>'}${r.levelNow ? ' <span class="warnchip">low</span>' : ''}</td>
+      <td class="muted" style="font-size:12px">${chip ? `hardware v${chip.hw} · ` : ''}calibration ${Object.entries(r.calibValueCount || {}).sort((a, b) => b[1] - a[1])[0]?.[0] ?? r.calibValue.join('/')}${Object.keys(r.calibValueCount || {}).length > 1 && !Object.entries(r.calibValueCount).sort((a, b) => b[1] - a[1]).slice(1).some(([, n]) => n > 1) ? ` <span title="Read differently in a single report: ${esc(Object.entries(r.calibValueCount).sort((a, b) => b[1] - a[1]).slice(1).map(([v]) => v).join(', '))}">(one-off misread)</span>` : ''} · status ${r.calibStatus.join('/')}</td>
+      <td class="muted" style="font-size:12px;white-space:nowrap">${fmtT(r.firstT)}</td>
+      <td>${issues.length ? issues.map(i => `<div class="warnchip">⚠ ${esc(i)}</div>`).join('') : '<span style="color:var(--good)">✓ consistent</span>'}</td></tr>`;
+  };
+  const head = `<thead><tr><th>Cartridge</th><th>Serial</th><th class="num">Capacity</th><th class="num">Ink left (count)</th><th class="num">Level sensor / threshold</th><th>Chip</th><th>First seen</th><th>Checks</th></tr></thead>`;
+  const inkRows = Object.values(latest).filter(r => r.kind === 'ink').sort((a, b) => a.tank < b.tank ? -1 : 1);
+  const moistRows = Object.values(latest).filter(r => r.kind === 'moist').sort((a, b) => a.tank < b.tank ? -1 : 1);
+  $('#cartTable').innerHTML = inkRows.length ? head + `<tbody>${inkRows.map(row).join('')}</tbody>` : '<tbody><tr><td class="muted">No cartridge reports in these logs.</td></tr></tbody>';
+  $('#moistTable').innerHTML = moistRows.length ? head.replace('<th>Cartridge</th>', '<th>Moisturizing fluid</th>').replace('Level sensor / threshold', 'Level sensor (raw)') + `<tbody>${moistRows.map(row).join('')}</tbody>` : '';
+  $('#moistNote').style.display = moistRows.length ? '' : 'none';
+
+  // level sensor as % of threshold, installed cartridges with a working sensor
+  const ds = inkRows.filter(r => r.sensor.some(p => p[1] > 0) && chipOf(r)).map(r => {
+    const th = chipOf(r).threshold;
+    return { label: cartLabel(r.tank), data: r.sensor.map(p => ({ x: p[0], y: p[1] / th * 100 })), borderColor: resolve(cartColor(r.tank)), backgroundColor: resolve(cartColor(r.tank)), pointRadius: 0, pointHitRadius: 6, borderWidth: 2, stepped: 'after' };
+  });
+  $('#sensorChart').parentElement.style.display = ds.length ? '' : 'none';
+  if (ds.length) mk('#sensorChart', { type: 'line', data: { datasets: ds },
+    options: { maintainAspectRatio: false, interaction: { mode: 'nearest', intersect: false, axis: 'x' },
+      plugins: { tooltip: { callbacks: { title: it => fmtT(it[0].parsed.x), label: c => ` ${c.dataset.label}: ${Math.round(c.parsed.y)}% of threshold` } } },
+      scales: { x: { type: 'time' }, y: { min: 0, suggestedMax: 100, title: { display: true, text: '% of low-ink threshold' } } } } });
+
+  // other serials: from the printer's per-serial ink file and from records no longer installed
+  const installed = new Set(Object.values(latest).map(r => r.tank + '|' + r.serial));
+  const hist = [];
+  const slots = Object.keys(DATA.tanks).sort().map(k => [k, DATA.tanks[k].cartridges || []])
+    .concat((DATA.moistTanks || []).map(m => ['m' + m.slot, m.cartridges || []]));
+  for (const [k, carts] of slots) for (const c of carts) {
+    if (installed.has(k + '|' + c.serial)) continue;
+    const rec = recs.find(r => r.serial === c.serial);
+    const full = (DATA.tanks[k] && DATA.inkSeries[k]) ? DATA.inkSeries[k][DATA.inkSeries[k].length - 1][2] : (k.startsWith('m') ? 260 : null);
+    const d = decodeSerial(c.serial), exp = SLOT_EXPECT[DATA.model?.name]?.[k];
+    const notes = [];
+    if (!rec) notes.push('not seen in these logs');
+    if (full && c.remainMl >= full - 2) notes.push('nearly full');
+    if (d && exp && d.code !== exp) notes.push(`${d.family} ${d.ink.toLowerCase()} serial`);
+    hist.push(`<tr><td><span class="sw" style="background:${cartColor(k)}"></span>${esc(cartLabel(k))}</td><td>${serialHtml(c.serial)}</td><td class="num">${c.remainMl.toFixed(2)} ml</td><td class="muted" style="font-size:12px">${esc(notes.join(' · '))}${!rec && full && c.remainMl >= full - 2 ? ' · likely factory testing' : ''}</td></tr>`);
+  }
+  for (const r of recs) if (!installed.has(r.tank + '|' + r.serial) && !slots.some(([k, cs]) => k === r.tank && cs.some(c => c.serial === r.serial)))
+    hist.push(`<tr><td><span class="sw" style="background:${cartColor(r.tank)}"></span>${esc(cartLabel(r.tank))}</td><td>${serialHtml(r.serial)}</td><td class="num">${r.remainLast?.toFixed(2) ?? '—'} ml</td><td class="muted" style="font-size:12px">installed ${fmtT(r.firstT)} – ${fmtT(r.lastT)}</td></tr>`);
+  $('#cartHistory').innerHTML = hist.length ? `<thead><tr><th>Slot</th><th>Serial</th><th class="num">Ink left (count)</th><th>Notes</th></tr></thead><tbody>${hist.join('')}</tbody>` : '<tbody><tr><td class="muted">No other serials recorded.</td></tr></tbody>';
 }
 
 // ---------------------------------------------------------------- events

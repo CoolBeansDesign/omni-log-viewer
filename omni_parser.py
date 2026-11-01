@@ -585,7 +585,7 @@ def detect_desktop_offset(desktop_jobs, history):
 
 def analyze(sources):
     stats = {'sources': []}
-    rec_texts, ac_texts, desktop, algo_texts = [], [], {}, []
+    rec_texts, ac_texts, desktop, algo_texts, ds_texts = [], [], {}, [], []
     newest_inkcons = (None, '')
     files = []
     for si, src in enumerate(sources):
@@ -595,6 +595,7 @@ def analyze(sources):
         recs = [f[k] for k in f if k.endswith('record/record.log')]
         rec_texts += recs
         ac_texts += [f[k] for k in files_matching(f, r'app-controller/app-controller(\.\d+)?\.log$')]
+        ds_texts += [f[k] for k in files_matching(f, r'device-service/device-service(\.\d+)?\.log$')]
         algo = [k for k in f if k.endswith('algo-server/server.log')]
         algo_texts += [f[k] for k in algo]
         days = []
@@ -615,6 +616,7 @@ def analyze(sources):
     record_text, stats['record'] = merge_device_logs(rec_texts)
     record = parse_record_log(record_text)
     ac_text, stats['appController'] = merge_device_logs(ac_texts)
+    ds_text, stats['deviceService'] = merge_device_logs(ds_texts)
     ink, moist, counters, boots = parse_app_controller([ac_text])
     # the printer names each cartridge in its ink-tank replies, e.g. "Fluorescent Red"
     device_names = {}
@@ -796,11 +798,86 @@ def analyze(sources):
         'counters': counters_latest,
         'headTimers': head_timers,
         'lineFills': line_fills,
+        'cartridges': parse_cartridges(ac_text, ds_text, dev_t),
         'countersSeries': counters_series[::max(1, len(counters_series) // 200)],
         'serviceStarts': len(boot_ts),
         'files': files,
         'stats': stats,
     }
+
+
+DEVINFO_RX = re.compile(r'^\[(\d{4}-[^\]]+)\][^\n]*?report property: (\{"/v1/project/device/info":.*)$', re.M)
+CHIP_RX = re.compile(r'^\[(\d{4}-[^\]]+)\][^\n]*?(?:inkTankRoute\[(\d+)\]\.tanks\[(\d+)\]|moistureTank\[(\d+)\]) (serial: (\w+)|hw version: (\d+), level threshold: (\d+))', re.M)
+
+
+def parse_cartridges(ac_text, ds_text, dev_t):
+    """Per-cartridge details the printer reports.
+
+    records: one per (slot, serial) from the printer's periodic device-info
+    reports: name, capacity, calibration status/value, low-ink flag, the
+    level-sensor reading and the printer's calculated ml left, plus any time
+    that ml count went up. chips: what the printer read from each cartridge's
+    chip when it was detected (serial, hardware version, low-ink threshold).
+    Ink slots are keyed '<route>-<tank>', moisturizing-fluid slots 'm<n>'."""
+    recs = {}
+    for m in DEVINFO_RX.finditer(ac_text):
+        if not valid_clock(m.group(1)):
+            continue
+        try:
+            info = json.loads(m.group(2))['/v1/project/device/info']
+        except (ValueError, KeyError, TypeError):
+            continue
+        t = dev_t(m.group(1))
+        items = []
+        for road, arr in (info.get('ink_tanks') or {}).items():
+            rm = re.match(r'inkRoad(\d+)$', road)
+            if rm and isinstance(arr, list):
+                items += [('ink', f"{int(rm.group(1)) - 1}-{c.get('tank_id')}", c) for c in arr]
+        moist = info.get('moisturizing') or []
+        base = min([c.get('index', 0) for c in moist] or [0])
+        items += [('moist', f"m{c.get('index', 0) - base}", c) for c in moist]
+        for kind, key, c in items:
+            serial = c.get('serial')
+            if not c.get('exist') or not serial:
+                continue
+            r = recs.get((key, serial))
+            if r is None:
+                r = recs[(key, serial)] = {'tank': key, 'kind': kind, 'serial': serial, 'name': c.get('name', ''),
+                                           'fullMl': [], 'calibStatus': [], 'calibValue': [], 'levelStatus': [],
+                                           'firstT': t, 'lastT': t, 'remainFirst': c.get('remain_ml'),
+                                           'remainLast': c.get('remain_ml'), 'remainUps': [], 'sensor': [],
+                                           'calibValueCount': {}, 'lowFlags': [], '_lvl': 0}
+            for fld, src in (('fullMl', 'full_ml'), ('calibStatus', 'calib_status'), ('calibValue', 'calib_value'), ('levelStatus', 'level')):
+                v = c.get(src)
+                if v is not None and v not in r[fld]:
+                    r[fld].append(v)
+            cv = c.get('calib_value')
+            if cv is not None:
+                r['calibValueCount'][str(cv)] = r['calibValueCount'].get(str(cv), 0) + 1
+            rem, lv = c.get('remain_ml'), c.get('level_value')
+            lvl = c.get('level') or 0
+            if lvl and not r['_lvl']:      # the printer raised its low-ink flag: note the count at that moment
+                r['lowFlags'].append([t, rem, lv])
+            r['_lvl'] = lvl
+            r['levelNow'] = lvl
+            if rem is not None and r['remainLast'] is not None and rem > r['remainLast'] + 0.5:
+                r['remainUps'].append({'t': t, 'from': r['remainLast'], 'to': rem})
+            if not r['sensor'] or r['sensor'][-1][1] != lv or r['sensor'][-1][2] != rem:
+                r['sensor'].append([t, lv, rem])
+            r['lastT'] = t
+            r['remainLast'] = rem
+    chips, pending = [], {}
+    for m in CHIP_RX.finditer(ds_text):
+        key = f'{m.group(2)}-{m.group(3)}' if m.group(2) is not None else f'm{m.group(4)}'
+        if m.group(6):
+            pending[key] = (m.group(1), m.group(6))
+        elif key in pending:
+            ts, serial = pending.pop(key)
+            chips.append({'t': dev_t(ts) if valid_clock(ts) else None, 'tank': key, 'serial': serial,
+                          'hw': int(m.group(7)), 'threshold': int(m.group(8))})
+    for r in recs.values():
+        del r['_lvl']
+    return {'records': sorted(recs.values(), key=lambda r: (r['tank'], r['firstT'])), 'chips': chips}
 
 
 def detect_model(tank_info):

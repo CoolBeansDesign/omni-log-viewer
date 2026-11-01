@@ -663,7 +663,7 @@ function detectDesktopOffset(desktopJobs, history) {
 
 function analyze(sources) {
   const stats = { sources: [] };
-  const recTexts = [], acTexts = [], algoTexts = [];
+  const recTexts = [], acTexts = [], algoTexts = [], dsTexts = [];
   const desktop = new Map();
   let newestInkcons = [null, ''];
   let files = [];
@@ -674,6 +674,7 @@ function analyze(sources) {
     const recs = [...f.keys()].filter(k => k.endsWith('record/record.log')).map(k => f.get(k));
     recTexts.push(...recs);
     acTexts.push(...filesMatching(f, /app-controller\/app-controller(\.\d+)?\.log$/).map(k => f.get(k)));
+    dsTexts.push(...filesMatching(f, /device-service\/device-service(\.\d+)?\.log$/).map(k => f.get(k)));
     const algo = [...f.keys()].filter(k => k.endsWith('algo-server/server.log'));
     algoTexts.push(...algo.map(k => f.get(k)));
     const days = [];
@@ -700,6 +701,8 @@ function analyze(sources) {
   const record = parseRecordLog(recordText);
   const [acText, acStats] = mergeDeviceLogs(acTexts);
   stats.appController = acStats;
+  const [dsText, dsStats] = mergeDeviceLogs(dsTexts);
+  stats.deviceService = dsStats;
   const [ink, moist, counters, boots] = parseAppController([acText]);
   // the printer names each cartridge in its ink-tank replies, e.g. "Fluorescent Red"
   const deviceNames = {};
@@ -875,12 +878,82 @@ function analyze(sources) {
     counters: countersLatest,
     headTimers,
     lineFills,
+    cartridges: parseCartridges(acText, dsText, devT),
     countersSeries: countersSeries.filter((_, i) => i % step === 0),
     serviceStarts: bootTs.length,
     files,
     stats,
     sources: stats.sources.map(s => s.file),
   };
+}
+
+const DEVINFO_RX = /^\[(\d{4}-[^\]]+)\][^\n]*?report property: (\{"\/v1\/project\/device\/info":.*)$/gm;
+const CHIP_RX = /^\[(\d{4}-[^\]]+)\][^\n]*?(?:inkTankRoute\[(\d+)\]\.tanks\[(\d+)\]|moistureTank\[(\d+)\]) (serial: (\w+)|hw version: (\d+), level threshold: (\d+))/gm;
+
+/* Per-cartridge details the printer reports. Mirrors parse_cartridges in omni_parser.py.
+   records: one per (slot, serial) from the printer's periodic device-info reports:
+   name, capacity, calibration status/value, low-ink flag, the level-sensor reading
+   and the printer's calculated ml left, plus any time that ml count went up.
+   chips: what the printer read from each cartridge's chip when it was detected
+   (serial, hardware version, low-ink threshold). Ink slots are keyed
+   '<route>-<tank>', moisturizing-fluid slots 'm<n>'. */
+function parseCartridges(acText, dsText, devT) {
+  const recs = new Map();
+  for (const m of acText.matchAll(DEVINFO_RX)) {
+    if (!validClock(m[1])) continue;
+    let info;
+    try { info = JSON.parse(m[2])['/v1/project/device/info']; } catch (e) { continue; }
+    if (!info || typeof info !== 'object') continue;
+    const t = devT(m[1]);
+    const items = [];
+    for (const [road, arr] of Object.entries(info.ink_tanks || {})) {
+      const rm = /^inkRoad(\d+)$/.exec(road);
+      if (rm && Array.isArray(arr)) for (const c of arr) items.push(['ink', `${parseInt(rm[1], 10) - 1}-${c.tank_id}`, c]);
+    }
+    const moist = info.moisturizing || [];
+    const base = moist.length ? Math.min(...moist.map(c => c.index ?? 0)) : 0;
+    for (const c of moist) items.push(['moist', `m${(c.index ?? 0) - base}`, c]);
+    for (const [kind, key, c] of items) {
+      const serial = c.serial;
+      if (!c.exist || !serial) continue;
+      const id = key + '\u0000' + serial;
+      let r = recs.get(id);
+      if (!r) {
+        r = { tank: key, kind, serial, name: c.name ?? '', fullMl: [], calibStatus: [], calibValue: [], levelStatus: [],
+              firstT: t, lastT: t, remainFirst: c.remain_ml ?? null, remainLast: c.remain_ml ?? null, remainUps: [], sensor: [],
+              calibValueCount: {}, lowFlags: [], _lvl: 0 };
+        recs.set(id, r);
+      }
+      for (const [fld, src] of [['fullMl', 'full_ml'], ['calibStatus', 'calib_status'], ['calibValue', 'calib_value'], ['levelStatus', 'level']]) {
+        const v = c[src];
+        if (v != null && !r[fld].includes(v)) r[fld].push(v);
+      }
+      const cv = c.calib_value;
+      if (cv != null) r.calibValueCount[String(cv)] = (r.calibValueCount[String(cv)] || 0) + 1;
+      const rem = c.remain_ml ?? null, lv = c.level_value ?? null;
+      const lvl = c.level || 0;
+      if (lvl && !r._lvl) r.lowFlags.push([t, rem, lv]);   // the printer raised its low-ink flag: note the count at that moment
+      r._lvl = lvl;
+      r.levelNow = lvl;
+      if (rem != null && r.remainLast != null && rem > r.remainLast + 0.5) r.remainUps.push({ t, from: r.remainLast, to: rem });
+      const last = r.sensor[r.sensor.length - 1];
+      if (!last || last[1] !== lv || last[2] !== rem) r.sensor.push([t, lv, rem]);
+      r.lastT = t;
+      r.remainLast = rem;
+    }
+  }
+  const chips = [], pending = new Map();
+  for (const m of dsText.matchAll(CHIP_RX)) {
+    const key = m[2] != null ? `${m[2]}-${m[3]}` : `m${m[4]}`;
+    if (m[6]) pending.set(key, [m[1], m[6]]);
+    else if (pending.has(key)) {
+      const [ts, serial] = pending.get(key); pending.delete(key);
+      chips.push({ t: validClock(ts) ? devT(ts) : null, tank: key, serial, hw: parseInt(m[7], 10), threshold: parseInt(m[8], 10) });
+    }
+  }
+  for (const r of recs.values()) delete r._lvl;
+  const records = [...recs.values()].sort((a, b) => (a.tank < b.tank ? -1 : a.tank > b.tank ? 1 : a.firstT - b.firstT));
+  return { records, chips };
 }
 
 /* Which Omni O1 variant this is, from the cartridges on the second head:
@@ -936,7 +1009,7 @@ function attribute(t0, t1, jobs, events) {
   return ['other', null];
 }
 
-const api = { loadSources, analyze, findInputs, _internal: { splitlines, pyRound, num, naiveMs, readTar, mergeDeviceLogs, parseGenpd, parseHeadTimers } };
+const api = { loadSources, analyze, findInputs, _internal: { splitlines, pyRound, num, naiveMs, readTar, mergeDeviceLogs, parseGenpd, parseHeadTimers, parseCartridges } };
 if (typeof module !== 'undefined' && module.exports) module.exports = api;
 else root.OmniParser = api;
 })(typeof self !== 'undefined' ? self : this);
