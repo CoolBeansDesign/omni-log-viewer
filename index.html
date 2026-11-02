@@ -543,8 +543,11 @@ function overview() {
   const c = DATA.counters || {};
   const labels = { processCount: ['Jobs processed', v => v], processTotalTime: ['Total processing time', fmtD], uvLampRunTime: ['UV lamp run time', fmtD],
     airPurifierRunTime: ['Air purifier run time', fmtD], opticalPathRunTime: ['Optical path run time', fmtD], standbyTime: ['Standby time', fmtD],
-    inkExtractionCount: ['Ink extraction (purge) count', v => v], scrapingCount: ['Wiper scraping count', v => v] };
-  $('#counters').innerHTML = Object.entries(c).map(([k, v]) => `<div>${esc(labels[k]?.[0] || k)}</div><div>${esc(labels[k] ? labels[k][1](v) : v)}</div>`).join('') || '<div class="muted">No counters found</div>';
+    inkExtractionCount: ['Ink extraction (purge) count', v => v], scrapingCount: ['Wiper scraping count', v => v],
+    head1StandardCleanCount: ['Head 1 standard cleans', v => v], head1DeepCleanCount: ['Head 1 deep cleans', v => v], head1FlashCleanCount: ['Head 1 flash cleans', v => v],
+    head2StandardCleanCount: ['Head 2 standard cleans', v => v], head2DeepCleanCount: ['Head 2 deep cleans', v => v], head2FlashCleanCount: ['Head 2 flash cleans', v => v] };
+  // newer firmware dumps its whole configuration here; show only the actual counters
+  $('#counters').innerHTML = Object.keys(labels).filter(k => c[k] != null).map(k => `<div>${esc(labels[k][0])}</div><div>${esc(labels[k][1](c[k]))}</div>`).join('') || '<div class="muted">No counters found</div>';
 
   const recent = DATA.events.filter(e => e.t && !['config', 'calibration'].includes(e.cat) && !e.kind.includes('finish') && !(e.cat === 'cleaning' && e.d.inPrint)).slice(-12).reverse();
   $('#recent').innerHTML = `<table>${recent.map(e => `<tr><td class="muted" style="white-space:nowrap">${fmtT(e.t)}</td><td><span class="sw" style="background:${CAT[e.cat].color}"></span>${esc(describe(e))}</td></tr>`).join('')}</table>`;
@@ -659,6 +662,7 @@ function renderNonPrint() {
     <div>Non-print share of ink cost</div><div>${allCost > 0 ? Math.round(npCost / (npCost + printCost) * 100) + '%' : '—'}</div>`;
   const by = {};
   for (const r of rows) { const b = by[r.src] = by[r.src] || { n: 0, ml: 0, cost: 0 }; b.n++; b.ml += r.ml; b.cost += r.cost; }
+  for (const k of Object.keys(by)) if (by[k].ml < 0.005) delete by[k];   // causes that rounded to 0 ml
   $('#npSummary').innerHTML = `<thead><tr><th>Cause</th><th class="num">Events</th><th class="num">Ink</th><th class="num">Cost</th><th class="num">Per event</th></tr></thead><tbody>` +
     Object.entries(by).sort((a, b) => b[1].cost - a[1].cost).map(([s, b]) => `<tr><td>${esc(causeLabel(s))}</td><td class="num">${b.n}</td><td class="num">${ml(b.ml)} ml</td><td class="num"><b>${money(b.cost)}</b></td><td class="num muted">${money(b.cost / b.n)}</td></tr>`).join('') + '</tbody>';
   const cols = [
