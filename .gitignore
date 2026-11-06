@@ -8,6 +8,7 @@
 logs/
 xTool_*
 omni_report.html
+*_report.html
 *.json
 
 # Python / OS clutter

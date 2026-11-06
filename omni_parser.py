@@ -585,7 +585,7 @@ def detect_desktop_offset(desktop_jobs, history):
 
 def analyze(sources):
     stats = {'sources': []}
-    rec_texts, ac_texts, desktop, algo_texts, ds_texts = [], [], {}, [], []
+    rec_texts, ac_texts, desktop, algo_texts, ds_texts, dbg_texts = [], [], {}, [], [], []
     newest_inkcons = (None, '')
     files = []
     for si, src in enumerate(sources):
@@ -596,6 +596,7 @@ def analyze(sources):
         rec_texts += recs
         ac_texts += [f[k] for k in files_matching(f, r'app-controller/app-controller(\.\d+)?\.log$')]
         ds_texts += [f[k] for k in files_matching(f, r'device-service/device-service(\.\d+)?\.log$')]
+        dbg_texts += [f[k] for k in files_matching(f, r'debug-service/debug-service(\.\d+)?\.log$')]
         algo = [k for k in f if k.endswith('algo-server/server.log')]
         algo_texts += [f[k] for k in algo]
         days = []
@@ -617,6 +618,7 @@ def analyze(sources):
     record = parse_record_log(record_text)
     ac_text, stats['appController'] = merge_device_logs(ac_texts)
     ds_text, stats['deviceService'] = merge_device_logs(ds_texts)
+    dbg_text, stats['debugService'] = merge_device_logs(dbg_texts)
     ink, moist, counters, boots = parse_app_controller([ac_text])
     # the printer names each cartridge in its ink-tank replies, e.g. "Fluorescent Red"
     device_names = {}
@@ -781,6 +783,8 @@ def analyze(sources):
         moist_series.setdefault(str(idx), []).append((dev_t(ts), remain, full))
 
     boot_ts = sorted(set(boots))
+    cartridges = parse_cartridges(ac_text, ds_text, dev_t)
+    ink_resets = detect_ink_resets(ac_text, dbg_text, dev_t, series, cartridges['records'], events)
     return {
         'generated': datetime.now(timezone.utc).isoformat(),
         'deviceOffsetMs': dev_off, 'deviceOffsetSource': dev_off_src,
@@ -798,7 +802,8 @@ def analyze(sources):
         'counters': counters_latest,
         'headTimers': head_timers,
         'lineFills': line_fills,
-        'cartridges': parse_cartridges(ac_text, ds_text, dev_t),
+        'cartridges': cartridges,
+        'inkResets': ink_resets,
         'countersSeries': counters_series[::max(1, len(counters_series) // 200)],
         'serviceStarts': len(boot_ts),
         'files': files,
@@ -878,6 +883,49 @@ def parse_cartridges(ac_text, ds_text, dev_t):
     for r in recs.values():
         del r['_lvl']
     return {'records': sorted(recs.values(), key=lambda r: (r['tank'], r['firstT'])), 'chips': chips}
+
+
+SET_REMAIN_RX = re.compile(r'^\[(\d{4}-[^\]]+)\][^\n]*?setInkRemain slot=(\d+) remainMl=([\d.]+)', re.M)
+SET_VOLUME_RX = re.compile(r'^\[(\d{4}-[^\]]+)\][^\n]*?http request, method: POST, uri: /v1/device/ink_tank/set_volume', re.M)
+RESET_WINDOW_MS = 3 * 3600 * 1000
+
+
+def detect_ink_resets(ac_text, dbg_text, dev_t, series, records, events):
+    """Cartridge ink counts set by command, the signature of a refill reset.
+
+    The printer's debug service accepts POST /v1/device/ink_tank/set_volume,
+    and the controller then logs 'setInkRemain slot=N remainMl=X' and carries
+    on counting from X. For each one: the slot, the serial installed, the count
+    just before, the new value, the level-sensor reading either side, and any
+    removal / re-insertion of that cartridge in the 3 hours before.
+    requests: every set_volume request (some firmware logs no setInkRemain line)."""
+    sets = []
+    for m in SET_REMAIN_RX.finditer(ac_text):
+        if not valid_clock(m.group(1)):
+            continue
+        t, slot, after = dev_t(m.group(1)), int(m.group(2)), float(m.group(3))
+        tank = f'{slot // 6}-{slot % 6}'
+        prev = [p for p in series.get(tank, []) if p[0] < t]
+        recs = [r for r in records if r['tank'] == tank and r['firstT'] <= t]
+        rec = next((r for r in recs if r['lastT'] >= t), recs[-1] if recs else None)
+        sb = [p for p in (rec['sensor'] if rec else []) if p[0] < t]
+        sa = [p for p in (rec['sensor'] if rec else []) if p[0] > t]
+        near = [e for e in events if e['t'] is not None and t - RESET_WINDOW_MS <= e['t'] <= t
+                and e['kind'] in ('ink tank removed', 'ink tank inserted')
+                and str(e['d'].get('route')) == str(slot // 6) and str(e['d'].get('tank')) == str(slot % 6)]
+        removed = [e['t'] for e in near if e['kind'] == 'ink tank removed']
+        inserted = [e['t'] for e in near if e['kind'] == 'ink tank inserted']
+        sets.append({'t': t, 'slot': slot, 'tank': tank, 'serial': rec['serial'] if rec else None,
+                     'before': prev[-1][1] if prev else None, 'after': after,
+                     'full': (series[tank][-1][2] if series.get(tank) else None),
+                     'sensorBefore': sb[-1][1] if sb else None, 'sensorAfter': sa[0][1] if sa else None,
+                     'removedAt': removed[-1] if removed else None, 'insertedAt': inserted[-1] if inserted else None})
+    requests = []
+    for m in SET_VOLUME_RX.finditer(dbg_text):
+        t = dev_t(m.group(1)) if valid_clock(m.group(1)) else None
+        matched = t is not None and any(0 <= s['t'] - t <= 10000 for s in sets)
+        requests.append({'t': t, 'matched': matched})
+    return {'sets': sets, 'requests': requests}
 
 
 def detect_model(tank_info):

@@ -663,7 +663,7 @@ function detectDesktopOffset(desktopJobs, history) {
 
 function analyze(sources) {
   const stats = { sources: [] };
-  const recTexts = [], acTexts = [], algoTexts = [], dsTexts = [];
+  const recTexts = [], acTexts = [], algoTexts = [], dsTexts = [], dbgTexts = [];
   const desktop = new Map();
   let newestInkcons = [null, ''];
   let files = [];
@@ -675,6 +675,7 @@ function analyze(sources) {
     recTexts.push(...recs);
     acTexts.push(...filesMatching(f, /app-controller\/app-controller(\.\d+)?\.log$/).map(k => f.get(k)));
     dsTexts.push(...filesMatching(f, /device-service\/device-service(\.\d+)?\.log$/).map(k => f.get(k)));
+    dbgTexts.push(...filesMatching(f, /debug-service\/debug-service(\.\d+)?\.log$/).map(k => f.get(k)));
     const algo = [...f.keys()].filter(k => k.endsWith('algo-server/server.log'));
     algoTexts.push(...algo.map(k => f.get(k)));
     const days = [];
@@ -702,6 +703,8 @@ function analyze(sources) {
   const [acText, acStats] = mergeDeviceLogs(acTexts);
   stats.appController = acStats;
   const [dsText, dsStats] = mergeDeviceLogs(dsTexts);
+  const [dbgText, dbgStats] = mergeDeviceLogs(dbgTexts);
+  stats.debugService = dbgStats;
   stats.deviceService = dsStats;
   const [ink, moist, counters, boots] = parseAppController([acText]);
   // the printer names each cartridge in its ink-tank replies, e.g. "Fluorescent Red"
@@ -861,6 +864,8 @@ function analyze(sources) {
 
   const bootTs = [...new Set(boots)].sort();
   const fw = events.find(e => e.kind === 'upgrade completed');
+  const cartridges = parseCartridges(acText, dsText, devT);
+  const inkResets = detectInkResets(acText, dbgText, devT, series, cartridges.records, events);
   return {
     generated: new Date().toISOString(),
     deviceOffsetMs: devOff, deviceOffsetSource: devOffSrc,
@@ -878,7 +883,8 @@ function analyze(sources) {
     counters: countersLatest,
     headTimers,
     lineFills,
-    cartridges: parseCartridges(acText, dsText, devT),
+    cartridges,
+    inkResets,
     countersSeries: countersSeries.filter((_, i) => i % step === 0),
     serviceStarts: bootTs.length,
     files,
@@ -956,6 +962,44 @@ function parseCartridges(acText, dsText, devT) {
   return { records, chips };
 }
 
+const SET_REMAIN_RX = /^\[(\d{4}-[^\]]+)\][^\n]*?setInkRemain slot=(\d+) remainMl=([\d.]+)/gm;
+const SET_VOLUME_RX = /^\[(\d{4}-[^\]]+)\][^\n]*?http request, method: POST, uri: \/v1\/device\/ink_tank\/set_volume/gm;
+const RESET_WINDOW_MS = 3 * 3600 * 1000;
+
+/* Cartridge ink counts set by command, the signature of a refill reset.
+   Mirrors detect_ink_resets in omni_parser.py: the debug service's POST
+   /v1/device/ink_tank/set_volume, then 'setInkRemain slot=N remainMl=X'. */
+function detectInkResets(acText, dbgText, devT, series, records, events) {
+  const sets = [];
+  for (const m of acText.matchAll(SET_REMAIN_RX)) {
+    if (!validClock(m[1])) continue;
+    const t = devT(m[1]), slot = parseInt(m[2], 10), after = parseFloat(m[3]);
+    const tank = `${Math.floor(slot / 6)}-${slot % 6}`;
+    const prev = (series.get(tank) || []).filter(p => p[0] < t);
+    const recs = records.filter(r => r.tank === tank && r.firstT <= t);
+    const rec = recs.find(r => r.lastT >= t) || (recs.length ? recs[recs.length - 1] : null);
+    const sb = (rec ? rec.sensor : []).filter(p => p[0] < t), sa = (rec ? rec.sensor : []).filter(p => p[0] > t);
+    const near = events.filter(e => e.t != null && t - RESET_WINDOW_MS <= e.t && e.t <= t
+      && (e.kind === 'ink tank removed' || e.kind === 'ink tank inserted')
+      && String(e.d.route) === String(Math.floor(slot / 6)) && String(e.d.tank) === String(slot % 6));
+    const removed = near.filter(e => e.kind === 'ink tank removed').map(e => e.t);
+    const inserted = near.filter(e => e.kind === 'ink tank inserted').map(e => e.t);
+    const ser = series.get(tank);
+    sets.push({ t, slot, tank, serial: rec ? rec.serial : null,
+      before: prev.length ? prev[prev.length - 1][1] : null, after,
+      full: ser && ser.length ? ser[ser.length - 1][2] : null,
+      sensorBefore: sb.length ? sb[sb.length - 1][1] : null, sensorAfter: sa.length ? sa[0][1] : null,
+      removedAt: removed.length ? removed[removed.length - 1] : null, insertedAt: inserted.length ? inserted[inserted.length - 1] : null });
+  }
+  const requests = [];
+  for (const m of dbgText.matchAll(SET_VOLUME_RX)) {
+    const t = validClock(m[1]) ? devT(m[1]) : null;
+    const matched = t != null && sets.some(s => s.t - t >= 0 && s.t - t <= 10000);
+    requests.push({ t, matched });
+  }
+  return { sets, requests };
+}
+
 /* Which Omni O1 variant this is, from the cartridges on the second head:
    DTG inks = UV/DT, fluorescent / flexible / rigid white = Dual-UV. Mirrors detect_model. */
 function detectModel(tankInfo) {
@@ -1009,7 +1053,7 @@ function attribute(t0, t1, jobs, events) {
   return ['other', null];
 }
 
-const api = { loadSources, analyze, findInputs, _internal: { splitlines, pyRound, num, naiveMs, readTar, mergeDeviceLogs, parseGenpd, parseHeadTimers, parseCartridges } };
+const api = { loadSources, analyze, findInputs, _internal: { splitlines, pyRound, num, naiveMs, readTar, mergeDeviceLogs, parseGenpd, parseHeadTimers, parseCartridges, detectInkResets } };
 if (typeof module !== 'undefined' && module.exports) module.exports = api;
 else root.OmniParser = api;
 })(typeof self !== 'undefined' ? self : this);

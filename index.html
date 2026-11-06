@@ -263,6 +263,20 @@ footer .brand img { height: 30px; width: auto; }
       </ul>
     </details>
   </div>
+  <div class="card" id="refillCard">
+    <h2>Refilled cartridges</h2>
+    <p class="note">Cartridges whose ink count was <b>set by command</b> rather than counted down: the signature of a refill and level reset. The printer's debug service accepts a "set volume" request, logs <code>setInkRemain</code> with the new amount, and carries on counting from there. <span id="refillSummary"></span></p>
+    <div class="scroll"><table id="refillTable"></table></div>
+    <details style="margin-top:10px"><summary>How refills are detected</summary>
+      <ul class="note" style="margin:8px 0 0;padding-left:18px">
+        <li><b>The evidence:</b> a <code>POST /v1/device/ink_tank/set_volume</code> request to the printer's debug service, followed by <code>setInkRemain slot=… remainMl=…</code> in the controller log. Each row shows the count just before and the value it was set to.</li>
+        <li><b>Supporting signs</b> shown alongside: the cartridge being taken out and put back in the 3 hours before (usually to refill it), and, on head-1 colour cartridges, the level sensor dropping at the same time, which means ink was physically added.</li>
+        <li>It's the printer's count that changes, not the cartridge chip: the serial and chip details stay the same.</li>
+        <li>Some firmware logs the request but not the new value. Those rows say "value not logged".</li>
+        <li>A level reset doesn't say who sent it or why. The debug service is also used by service and diagnostic tools.</li>
+      </ul>
+    </details>
+  </div>
 </section>
 
 <section id="events">
@@ -322,6 +336,13 @@ footer .brand img { height: 30px; width: auto; }
 </section>
 
 <section id="changelog">
+  <div class="card">
+    <h2>November 6, 2026 <span class="chip" style="font-weight:500;vertical-align:2px">Refill detection</span></h2>
+    <ul style="margin:8px 0 0;padding-left:18px">
+      <li><b>Refilled cartridges</b> (Ink usage tab): every cartridge whose ink count was set by command (a "set volume" request to the printer's debug service, logged as <code>setInkRemain</code>). It shows the count before, the new value, how much was added, the level-sensor reading either side, and when the cartridge was taken out and put back.</li>
+      <li>The cartridge consistency checks now say when a rise in a cartridge's count came from one of these level resets.</li>
+    </ul>
+  </div>
   <div class="card">
     <h2>November 1, 2026 <span class="chip" style="font-weight:500;vertical-align:2px">Cartridge details and checks</span></h2>
     <ul style="margin:8px 0 0;padding-left:18px">
@@ -796,6 +817,7 @@ function inkTab() {
     : '<tr><td class="muted">No jobs with Studio estimates.</td></tr>';
 
   cartridgesCard();
+  refillCard();
 }
 
 // ---------------------------------------------------------------- cartridges
@@ -826,7 +848,11 @@ function cartChecks(r, recs, chips) {
   for (const u of r.remainUps) {
     const before = r.sensor.filter(p => p[0] < u.t).pop(), at = r.sensor.find(p => p[0] === u.t);
     const sens = before && at && before[1] > 0 && at[1] < before[1] - 5 ? `, and at the same time the level sensor dropped from ${before[1]} to ${at[1]} (reads fuller), which suggests the cartridge was refilled` : '';
-    out.push(`Ink count went up from ${ml(u.from)} to ${ml(u.to)} ml on ${fmtT(u.t)}${sens}`);
+    // the count rise shows at the next full report, which can be hours after the reset itself
+    const prevT = (r.sensor.filter(p => p[0] < u.t).pop() || [0])[0];
+    const reset = (DATA.inkResets?.sets || []).filter(s => s.tank === r.tank && s.t > prevT && s.t <= u.t).pop();
+    out.push(reset ? `Ink count was set to ${ml(reset.after)} ml by a level-reset command on ${fmtT(reset.t)} (was ${ml(reset.before)} ml)${sens}; see Refilled cartridges`
+                   : `Ink count went up from ${ml(u.from)} to ${ml(u.to)} ml on ${fmtT(u.t)}${sens}`);
   }
   if (r.fullMl.length > 1) out.push(`Capacity changed: ${r.fullMl.join(' → ')} ml`);
   const cvc = Object.entries(r.calibValueCount || {}).sort((a, b) => b[1] - a[1]);
@@ -841,6 +867,37 @@ function cartChecks(r, recs, chips) {
   if (r.kind === 'ink' && sensorWorks && th && pct != null && pct < 25 && lv != null && lv < th / 2) out.push(`Count is down to ${Math.round(pct)}% but the level sensor is far from its low threshold (${lv} of ${th})`);
   return out;
 }
+// Ink counts set by command (refill resets), from DATA.inkResets
+function refillCard() {
+  const R = DATA.inkResets || { sets: [], requests: [] };
+  const sets = R.sets, orphans = R.requests.filter(q => !q.matched);
+  const firstInk = tankKeys.length ? inkDataFrom() : null;
+  if (!sets.length && !orphans.length) {
+    $('#refillSummary').textContent = '';
+    $('#refillTable').innerHTML = '<tbody><tr><td><span style="color:var(--good)">✓</span> No level resets in these logs: no cartridge\'s ink count was set by command.</td></tr></tbody>';
+    return;
+  }
+  const added = sets.map(s => s.before != null ? Math.max(0, s.after - s.before) : 0);
+  const cost = sum(sets.map((s, i) => added[i] * perMl(s.tank)));
+  const carts = new Set(sets.map(s => s.serial || s.tank)).size;
+  $('#refillSummary').textContent = `${sets.length} level reset${sets.length === 1 ? '' : 's'} on ${carts} cartridge${carts === 1 ? '' : 's'}, adding ${ml(sum(added))} ml to the printer's counts (about ${money(cost)} of ink at the prices on the Print jobs tab).` +
+    (orphans.length ? ` ${orphans.length} more request${orphans.length === 1 ? '' : 's'} with no value logged.` : '');
+  const rows = sets.map((s, i) => {
+    const pct = v => s.full > 0 && v != null ? ` <span class="muted">(${Math.round(v / s.full * 100)}%)</span>` : '';
+    const sensor = s.sensorBefore > 0 || s.sensorAfter > 0 ? `${s.sensorBefore ?? '—'} → ${s.sensorAfter ?? '—'}${s.sensorBefore - s.sensorAfter > 5 ? ' <span class="muted">(reads fuller)</span>' : ''}` : '<span class="muted">no reading</span>';
+    const handled = s.removedAt ? `out ${fmtT(s.removedAt)}${s.insertedAt ? `, back in ${fmtT(s.insertedAt)}` : ''}` : '<span class="muted">not in the 3 h before</span>';
+    return { t: s.t, html: `<tr><td style="white-space:nowrap">${fmtT(s.t)}</td><td><span class="sw" style="background:${tcolor(s.tank)}"></span>${esc(DATA.tanks[s.tank] ? tlabel(s.tank) : 'Slot ' + s.slot)}</td>
+      <td>${s.serial ? serialHtml(s.serial) : '—'}</td>
+      <td class="num">${s.before != null ? ml(s.before) + ' ml' + pct(s.before) : '—'}</td>
+      <td class="num"><b>${ml(s.after)} ml</b>${pct(s.after)}</td>
+      <td class="num">${s.before != null ? '+' + ml(added[i]) + ' ml' : '—'}</td>
+      <td class="num">${sensor}</td><td class="muted" style="font-size:12px">${handled}</td></tr>` };
+  });
+  for (const q of orphans) rows.push({ t: q.t ?? 0, html: `<tr><td style="white-space:nowrap">${q.t ? fmtT(q.t) : '<span class="muted">before clock sync</span>'}</td><td colspan="7" class="muted">Set-volume request; value not logged${q.t != null && firstInk != null && q.t < firstInk ? ', and the ink readings in these logs start later' : ''}.</td></tr>` });
+  rows.sort((a, b) => b.t - a.t);
+  $('#refillTable').innerHTML = `<thead><tr><th>When</th><th>Cartridge</th><th>Serial</th><th class="num">Count before</th><th class="num">Set to</th><th class="num">Added</th><th class="num">Level sensor</th><th>Taken out / put back</th></tr></thead><tbody>${rows.map(r => r.html).join('')}</tbody>`;
+}
+
 function cartridgesCard() {
   const C = DATA.cartridges || { records: [], chips: [] };
   const recs = C.records, chips = C.chips;

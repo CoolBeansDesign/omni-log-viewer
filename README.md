@@ -86,6 +86,8 @@ Cartridge levels over time, use by cause and by day, and a forecast of when each
 
 ![Cartridges: serials, ink left, level sensor, chip details and consistency checks](assets/screenshots/cartridges.png)
 
+**Refilled cartridges** lists every cartridge whose ink count was set by command (a refill and level reset), with the count before and after, how much was added and the level-sensor reading either side.
+
 ### Maintenance & events
 
 A timeline of printing, cleans, white-ink stirring, sleep, wake-ups, boots and alarms, with a summary and a searchable list of everything the printer logged.
