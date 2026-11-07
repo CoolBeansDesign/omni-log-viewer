@@ -306,6 +306,27 @@ footer .brand img { height: 30px; width: auto; }
     <details style="margin-top:8px"><summary>What resets the timers</summary><div id="headTimerResets" class="note" style="margin-top:8px"></div></details>
     <details style="margin-top:12px"><summary>All head counters and firmware thresholds</summary><div id="headTimerDetail" style="margin-top:8px"></div></details>
   </div>
+  <div class="card" id="rollCard">
+    <h2>Roll feeder</h2>
+    <p class="note">The roll material stand: every time the printer fed film from the roll, what it found, Studio's film-length checks, and the jobs printed on the roll. Times are your local time.</p>
+    <div class="kv" id="rollSummary"></div>
+    <h3 style="margin:16px 0 6px;font-size:14px">Feeds</h3>
+    <div class="scroll"><table id="rollFeeds"></table></div>
+    <div id="rollAlarmsWrap"><h3 style="margin:16px 0 6px;font-size:14px">Roll feeder alarms</h3>
+    <div class="scroll"><table id="rollAlarms"></table></div></div>
+    <h3 style="margin:16px 0 6px;font-size:14px">Jobs on the roll</h3>
+    <div class="scroll"><table id="rollJobs"></table></div>
+    <details style="margin-top:12px"><summary>How to read this</summary>
+      <ul class="note" style="margin:8px 0 0;padding-left:18px">
+        <li><b>Tagged film:</b> before each job the printer feeds the film, reads the roll's tag and measures how much is left. It reports whole metres, rounded down, so anything under 1 m reads as 0 m.</li>
+        <li><b>Studio's check:</b> Studio compares the job's length with what the printer measured and refuses the job if it doesn't fit. It also logs a 1000 mm roll margin with every check; the logs don't say whether that margin is added to the job. With 0 m measured, every job is refused.</li>
+        <li><b>Untagged film</b> (no tag, material set to Unknown): the printer feeds about 300 mm checking that the film has no xTool tag, then goes ahead. It doesn't measure the roll and Studio doesn't check the length, so nothing stops a job running past the end of the film.</li>
+        <li><b>No tag found:</b> the material selected in Studio expects a tagged roll but the printer couldn't read one. Studio blocks the job.</li>
+        <li><b>Feed only:</b> the feed button, which tightens the film without reading the tag or measuring.</li>
+        <li><b>Length</b> of a job is the height of its print area in Studio. Film wound back or cut off by hand doesn't appear in the logs.</li>
+      </ul>
+    </details>
+  </div>
   <div class="card">
     <div class="controls" id="evFilters"></div>
     <div class="scroll"><table id="evTable"></table></div>
@@ -336,6 +357,13 @@ footer .brand img { height: 30px; width: auto; }
 </section>
 
 <section id="changelog">
+  <div class="card">
+    <h2>November 6, 2026 <span class="chip" style="font-weight:500;vertical-align:2px">Roll feeder</span></h2>
+    <ul style="margin:8px 0 0;padding-left:18px">
+      <li><b>Roll feeder</b> (Maintenance &amp; events tab): every film feed from the roll material stand, what the printer found (the roll's tag and how much film it measured, untagged film, or a failed feed), Studio's film-length checks and the jobs it refused, roll feeder alarms, and the jobs printed on the roll with their length.</li>
+      <li>xTool Studio's times are now converted with the computer's clock offset for each day, so they stay right across a daylight saving change. The About tab shows each offset and when it changed.</li>
+    </ul>
+  </div>
   <div class="card">
     <h2>November 6, 2026 <span class="chip" style="font-weight:500;vertical-align:2px">Refill detection</span></h2>
     <ul style="margin:8px 0 0;padding-left:18px">
@@ -1050,11 +1078,91 @@ function eventsTab() {
   render();
 }
 
+// ---------------------------------------------------------------- roll feeder
+const ROLL_ALARMS = { EVENT_ALARM_FEED_FILM_ID_MISMATCH: "Roll's tag doesn't match the selected material",
+  EVENT_ALARM_FEED_FILM: 'Film feed failed', EVENT_ALARM_SWITCH_Y_POSITION: 'Y-axis switch, with the laminator online' };
+function rollCard() {
+  const R = DATA.roll;
+  $('#rollCard').style.display = R ? '' : 'none';
+  if (!R) return;
+  const jobs = new Map(DATA.jobs.map(j => [j.taskId, j]));
+  const mm = v => v == null ? '—' : `${Math.round(v).toLocaleString()} mm`;
+  const lenOf = j => j && j.size && j.size.h ? j.size.h : null;
+  const jobFeeds = R.feeds.filter(f => !f.onlyFeed);
+  const lastOk = [...jobFeeds].reverse().find(f => f.result === 'ok');
+  const lastMeas = [...jobFeeds].reverse().find(f => f.remainingM != null);
+  const printedSince = t => sum(R.jobs.map(r => jobs.get(r.taskId)).filter(j => j && j.start >= t && j.end).map(j => lenOf(j) || 0));
+  let current = '<span class="muted">No completed feed yet</span>';
+  if (lastOk && lastOk.path === 'untagged')
+    current = `<b>Untagged film</b> (material Unknown) since ${fmtT(lastOk.t)}. The printer doesn't measure it, so what's left isn't tracked. ${mm(printedSince(lastOk.t))} printed on it since.`;
+  else if (lastOk)
+    current = `<b>Tagged film</b>, type ${lastOk.filmType ?? lastOk.rollerId ?? '?'}` +
+      (lastMeas ? `. Measured <b>${lastMeas.remainingM} m</b> left on ${fmtT(lastMeas.t)} (whole metres, rounded down); ${mm(printedSince(lastMeas.end))} printed since.` : '.');
+  const rd = R.readings[R.readings.length - 1];
+  const reading = !rd ? '<span class="muted">none logged</span>'
+    : rd.lengthM || rd.remainingMm || rd.filmType ? `${rd.lengthM} m roll, film type ${rd.filmType}, ${mm(rd.remainingMm)} left <span class="muted">(${fmtT(rd.t)})</span>`
+    : `no film information <span class="muted">(${fmtT(rd.t)}; normal for untagged film)</span>`;
+  const conns = R.connections.filter(c => c.connected), lastConn = R.connections[R.connections.length - 1];
+  const refused = jobFeeds.filter(f => f.check && !f.check.ok).length, blocked = jobFeeds.filter(f => f.blocked).length;
+  $('#rollSummary').innerHTML = `
+    <div>Roll feeder</div><div>${R.serial ? `<code>${esc(R.serial)}</code>` : '—'}${conns.length ? ` · first connected ${fmtT(conns[0].t)}` : ''}${lastConn ? ` · ${lastConn.connected ? 'connected' : 'disconnected'} ${fmtT(lastConn.t)}` : ''}</div>
+    <div>Current roll</div><div>${current}</div>
+    <div>Studio's last reading</div><div>${reading}</div>
+    <div>Feeds</div><div>${jobFeeds.length} for jobs, ${R.feeds.length - jobFeeds.length} with the feed button</div>
+    <div>Jobs refused</div><div>${refused || blocked ? `<span class="warnchip">${refused + blocked}</span>` : '0'}${refused ? ` · ${refused} not enough film` : ''}${blocked ? ` · ${blocked} tag mismatch` : ''}</div>`;
+
+  const bad = h => `<span class="warnchip">⚠</span> ${h}`;
+  const material = f => f.onlyFeed ? '<span class="muted">—</span>' : f.rollerId > 0 ? `Film type ${f.rollerId}` : f.rollerId === 0 || f.material === false ? 'Unknown' : '—';
+  const result = f => {
+    if (f.result === 'mismatch') return bad(`No tag found <span class="muted">(${esc(f.note)})</span>`);
+    if (f.result === 'failed') return bad(/^limit not trigger/.test(f.note || '') ? "Film didn't go taut <span class=\"muted\">(no film loaded, or the limit sensor)</span>" : esc(f.note));
+    if (f.result === 'incomplete') return bad("Feed didn't finish");
+    if (f.onlyFeed) return 'Fed and tightened';
+    if (f.path === 'untagged') return `Untagged, not measured <span class="muted">(${esc(f.note || 'checked')})</span>`;
+    if (f.path === 'tagged') return `Tag read (type ${f.filmType ?? '?'})` + (f.remainingM != null ? `, measured <b>${f.remainingM} m</b> left` : '');
+    return 'Fed';
+  };
+  const studio = f => {
+    if (f.blocked) return bad('Blocked: tag mismatch');
+    const c = f.check;
+    if (!c) return '<span class="muted">—</span>';
+    return c.ok ? `Needs ${mm(c.required)}: OK` : bad(`Refused: needs ${mm(c.required)}, has ${mm(c.remaining)}`);
+  };
+  const jobCell = f => { const j = f.taskId && jobs.get(f.taskId); return j ? esc((j.name || f.taskId).replace(/\.xs$/, '')) : '<span class="muted">—</span>'; };
+  $('#rollFeeds').innerHTML = `<thead><tr><th>When</th><th>Feed</th><th>Material</th><th>Printer found</th><th>Studio's length check</th><th>Job</th></tr></thead><tbody>` +
+    [...R.feeds].reverse().map(f => `<tr><td style="white-space:nowrap">${fmtT(f.t)}</td><td>${f.onlyFeed ? 'Feed button' : 'For a job'}</td><td>${material(f)}</td><td>${result(f)}</td><td>${studio(f)}</td><td>${jobCell(f)}</td></tr>`).join('') + '</tbody>';
+
+  $('#rollAlarmsWrap').style.display = R.alarms.length ? '' : 'none';
+  $('#rollAlarms').innerHTML = `<thead><tr><th>When</th><th>Alarm</th><th>Printer's message</th></tr></thead><tbody>` +
+    [...R.alarms].reverse().map(a => `<tr><td style="white-space:nowrap">${fmtT(a.t)}</td><td><b>${esc(a.code || '')}</b> ${esc(ROLL_ALARMS[(a.name || '').replace(/,$/, '')] || (a.name || '').replace(/,$/, ''))}</td><td class="muted" style="font-size:12px">${esc(a.text || '')}</td></tr>`).join('') + '</tbody>';
+
+  const rows = [...R.jobs].reverse().map(r => {
+    const j = jobs.get(r.taskId), f = R.feeds[r.feed];
+    if (!j) return '';
+    const done = j.end ? 'Finished' : /CANCEL/i.test(j.status || '') ? 'Cancelled' : '—';
+    const after = R.readings.find(x => x.t > (j.end || j.start) && x.t - (j.end || j.start) < 12 * 3600e3);
+    return `<tr><td style="white-space:nowrap">${fmtT(j.start)}</td><td>${esc((j.name || r.taskId).replace(/\.xs$/, ''))}</td><td class="num">${mm(lenOf(j))}</td>
+      <td>${f.path === 'untagged' ? 'Untagged' : f.remainingM != null ? `Tagged, ${f.remainingM} m measured` : 'Tagged'}</td><td>${done}</td>
+      <td class="num">${after && (after.lengthM || after.remainingMm) ? `${mm(after.remainingMm)} left` : '<span class="muted">—</span>'}</td></tr>`;
+  }).join('');
+  $('#rollJobs').innerHTML = `<thead><tr><th>Started</th><th>Job</th><th class="num">Length</th><th>Film</th><th>Result</th><th class="num">Studio's reading after</th></tr></thead><tbody>` +
+    (rows || '<tr><td colspan="6" class="muted">No jobs printed on the roll yet.</td></tr>') + '</tbody>';
+}
+
 // ---------------------------------------------------------------- about
+// the computer's offset, with each change (e.g. daylight saving) and the day it started
+function deskClock(off) {
+  const days = Object.entries(DATA.desktopDayOffsetsMs || {}).sort((a, b) => a[0] < b[0] ? -1 : 1);
+  const runs = [];
+  for (const [d, v] of days) if (!runs.length || runs[runs.length - 1][1] !== v) runs.push([d, v]);
+  if (runs.length < 2) return off(DATA.desktopOffsetMs);
+  const day = d => new Date(d + 'T12:00:00').toLocaleDateString([], { month: 'short', day: 'numeric' });
+  return runs.map(([d, v], i) => `${off(v)}${i ? ` from ${day(d)}` : ''}`).join(', ');
+}
 function aboutTab() {
   const off = ms => ms == null ? 'n/a' : `UTC${ms >= 0 ? '+' : '−'}${Math.abs(ms) / 3600000}`;
   $('#aboutKv').innerHTML = `    <div>Printer clock</div><div>${off(DATA.deviceOffsetMs)} (${esc(DATA.deviceOffsetSource)})</div>
-    <div>Desktop clock</div><div>${off(DATA.desktopOffsetMs)} (${esc(DATA.desktopOffsetSource)})</div>
+    <div>Desktop clock</div><div>${deskClock(off)} (${esc(DATA.desktopOffsetSource)})</div>
     <div>Firmware</div><div>${esc(DATA.firmware || '?')}</div>
     <div>Device events</div><div>${DATA.events.length}</div>
     <div>Ink snapshots</div><div>${sum(Object.values(DATA.inkSeries).map(s => s.length))}</div>
@@ -1155,7 +1263,7 @@ function renderAll() {
   if (!DATA) return;
   charts.splice(0).forEach(c => c.destroy());
   chartDefaults();
-  header(); overview(); jobsTab(); inkTab(); eventsTab(); headTimersTab(); aboutTab();
+  header(); overview(); jobsTab(); inkTab(); eventsTab(); headTimersTab(); rollCard(); aboutTab();
 }
 document.querySelectorAll('#tabs button').forEach(b => b.onclick = () => {
   document.querySelectorAll('#tabs button').forEach(x => x.classList.toggle('on', x === b));

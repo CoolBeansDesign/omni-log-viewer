@@ -94,6 +94,8 @@ A timeline of printing, cleans, white-ink stirring, sleep, wake-ups, boots and a
 
 ![Timeline of printer events with maintenance and power summaries](assets/screenshots/events.png)
 
+**Roll feeder** appears once a roll material stand has been used: every film feed, how much film the printer measured on a tagged roll (or that the film was untagged), the jobs Studio refused for lack of film, roll feeder alarms, and the jobs printed on the roll.
+
 **Head idle timers** (preliminary) track how long each print head has sat idle since its last clean, with an estimate of when it reaches 7 days.
 
 ![Head idle timers with the 7-day estimate](assets/screenshots/head-timers.png)

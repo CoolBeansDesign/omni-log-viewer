@@ -657,6 +657,37 @@ function detectDesktopOffset(desktopJobs, history) {
   return [null, 'unknown'];
 }
 
+/* The computer's clock offset for each day it created jobs. Daylight saving
+   changes the offset partway through the logs, so a single value is wrong for
+   some days. Mirrors desktop_day_offsets. */
+function desktopDayOffsets(desktopJobs, history) {
+  const byDay = new Map();
+  for (const j of desktopJobs) {
+    const ca = num(get(history.get(j.taskId) || {}, 'createdAt'));
+    if (truthy(ca)) setdefault(byDay, j.createdLocal.slice(0, 10), []).push(naiveMs(j.createdLocal) - ca);
+  }
+  const out = {};
+  for (const [d, v] of byDay) { v.sort((a, b) => a - b); out[d] = roundOffset(v[Math.floor(v.length / 2)]); }
+  return out;
+}
+
+// ts (computer's local time) -> UTC ms: that day's offset, else the nearest day's, else the overall one.
+function desktopClock(dayOffsets, fallback) {
+  const days = Object.keys(dayOffsets).sort();
+  return ts => {
+    const d = ts.slice(0, 10);
+    let off = has(dayOffsets, d) ? dayOffsets[d] : null;
+    if (off == null && days.length) {
+      const dm = naiveMs(d + ' 00:00:00.000');
+      let best = null;
+      for (const x of days) { const dist = Math.abs(naiveMs(x + ' 00:00:00.000') - dm); if (best == null || dist < best[0]) best = [dist, x]; }
+      off = dayOffsets[best[1]];
+    }
+    if (off == null) off = fallback;
+    return off == null ? null : naiveMs(ts) - off;
+  };
+}
+
 // --------------------------------------------------------------------------
 // Main analysis
 // --------------------------------------------------------------------------
@@ -713,11 +744,13 @@ function analyze(sources) {
 
   let desktopJobs = [];
   const history = new Map();
+  const deskTexts = [];
   stats.desktopDropped = 0;
   for (const day of [...desktop.keys()].sort()) {
     const kept = dedupeDesktopLogs(desktop.get(day));
     stats.desktopDropped += desktop.get(day).length - kept.length;
     for (const [label, text] of kept) {
+      deskTexts.push(text);
       const [jobs, hist] = parseDesktopMain(text, label);
       desktopJobs = desktopJobs.concat(jobs);
       for (const [tid, h] of hist) Object.assign(setdefault(history, tid, {}), h);
@@ -733,6 +766,8 @@ function analyze(sources) {
 
   const [devOff, devOffSrc] = detectDeviceOffset(record, history);
   const [deskOff, deskOffSrc] = detectDesktopOffset(desktopJobs, history);
+  const deskDayOffs = desktopDayOffsets(desktopJobs, history);
+  const deskT = desktopClock(deskDayOffs, deskOff);
   const devT = ts => naiveMs(ts) - devOff;
 
   // ---------- tank identities ----------
@@ -866,10 +901,12 @@ function analyze(sources) {
   const fw = events.find(e => e.kind === 'upgrade completed');
   const cartridges = parseCartridges(acText, dsText, devT);
   const inkResets = detectInkResets(acText, dbgText, devT, series, cartridges.records, events);
+  const roll = parseRoll(acText, deskTexts, devT, deskT, events, jobs);
   return {
     generated: new Date().toISOString(),
     deviceOffsetMs: devOff, deviceOffsetSource: devOffSrc,
     desktopOffsetMs: deskOff, desktopOffsetSource: deskOffSrc,
+    desktopDayOffsetsMs: deskDayOffs,
     firmware: fw ? get(fw.d, 'version') : null,
     tanks: Object.fromEntries(tankInfo),
     model: detectModel(tankInfo),
@@ -885,6 +922,7 @@ function analyze(sources) {
     lineFills,
     cartridges,
     inkResets,
+    roll,
     countersSeries: countersSeries.filter((_, i) => i % step === 0),
     serviceStarts: bootTs.length,
     files,
@@ -1000,6 +1038,130 @@ function detectInkResets(acText, dbgText, devT, series, records, events) {
   return { sets, requests };
 }
 
+const ROLL_RX = /^\[(\d{4}-[^\]]+)\] \[-\w-\] \[app_roller_laminator\.cpp:\d+ [^\]]*\] : (.*)$/gm;
+const STUDIO_ROLL_RX = new RegExp(
+  String.raw`^\[(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d+)\][^\n]*?(?:` +
+  String.raw`'=> checkFilmLengthSufficient', \{ requiredLength: ([\d.]+), rollerLenOffset: ([\d.]+)` +
+  String.raw`|'Roller film insufficient', 'Required: ([\d.]+)mm, Remaining: ([\d.]+)mm'` +
+  String.raw`|'detectFeedFilm', '(film mismatch)'` +
+  String.raw`|'ext\.deviceInfo\.rollerPlugin\.info', \{ filmInfo: \{ filmLength: ([\d.]+), filmRemaining: ([\d.]+), filmType: (\d+), filmUsed: ([\d.]+) \}[^\n]*?sn: '(\w*)')`,
+  'gm');
+const ROLL_MATCH_MS = 120 * 1000;      // Studio's check follows the printer's feed within seconds
+const ROLL_JOB_MS = 15 * 60 * 1000;    // a job starts within minutes of the feed made for it
+
+/* The roll feeder (RollMaterialStand): every film feed the printer made, what it
+   found (a tag read and the roll measured, untagged film checked, or a failure),
+   Studio's film-length checks and its readings of the roll, the feeder's
+   connections and alarms, and which print jobs ran on the roll. Null when the
+   logs have no roll feeder activity. Mirrors parse_roll in omni_parser.py. */
+function parseRoll(acText, deskTexts, devT, deskT, events, jobs) {
+  const feeds = [];
+  let cur = null;
+  const state = { material: null, onlyFeed: null, rollerId: null };
+  const close = t => {
+    if (cur != null) {
+      if (cur.result == null) cur.result = 'incomplete';
+      if (cur.end == null) cur.end = t;
+    }
+    cur = null;
+  };
+  for (const m of acText.matchAll(ROLL_RX)) {
+    const ts = m[1], msg = m[2].trim();
+    if (!validClock(ts)) continue;
+    const t = devT(ts);
+    let x;
+    if (msg.startsWith('set is material: ')) state.material = msg.endsWith('true');
+    else if (msg.startsWith('set only feed: ')) state.onlyFeed = msg.endsWith('true');
+    else if ((x = /^set film ids: rollerId=(\d+)/.exec(msg))) state.rollerId = parseInt(x[1], 10);
+    else if (msg === 'start feed film') {
+      close(t);
+      const only = !!state.onlyFeed;
+      cur = { t, end: null, onlyFeed: only, material: state.material,
+        rollerId: only ? null : state.rollerId, path: only ? 'feed' : null,
+        filmType: null, remainingM: null, encoderSum: null,
+        result: null, note: null, check: null, blocked: false, taskId: null };
+      feeds.push(cur);
+      state.rollerId = null;
+    } else if (cur == null) continue;
+    else if (msg.includes('transition to identify')) cur.path = 'tagged';
+    else if (msg.includes('transition to pre-verify-unofficial')) cur.path = 'untagged';
+    else if ((x = /(?:roller film identified, type=|official film type=)(\d+)/.exec(msg))) cur.filmType = parseInt(x[1], 10);
+    else if ((x = /calc-length done: .*?encoder sum\D*(\d+), remaining=(\d+)m/.exec(msg))) { cur.encoderSum = parseInt(x[1], 10); cur.remainingM = parseInt(x[2], 10); }
+    else if (msg.startsWith('verify-unofficial passed')) { const i = msg.indexOf(': '); cur.note = i >= 0 ? msg.slice(i + 2) : msg; }
+    else if ((x = /identify over travel without tag, roller expect (\d+) got (\d+)/.exec(msg))) {
+      cur.result = 'mismatch'; cur.note = `expected film type ${x[1]}, read ${x[2]}`; close(t);
+    } else if (msg.startsWith('limit not trigger')) { cur.result = 'failed'; cur.note = msg; close(t); }
+    else if (msg === 'feed film complete') { cur.result = 'ok'; close(t); }
+    else if (/fail|error/i.test(msg)) cur.note = msg;
+  }
+  close(cur ? cur.t : null);
+
+  // Studio: length checks, tag mismatches and the roll as Studio last saw it
+  const checks = [], mismatches = [];
+  let readings = [];
+  const seen = new Set();
+  for (const text of deskTexts) {
+    for (const m of text.matchAll(STUDIO_ROLL_RX)) {
+      const t = deskT(m[1]);
+      const key = m[1] + '\u0000' + m[0].slice(-60);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      if (m[2] !== undefined) checks.push({ t, required: parseFloat(m[2]), offset: parseFloat(m[3]), ok: true, remaining: null });
+      else if (m[4] !== undefined) {
+        const req = parseFloat(m[4]);
+        const prev = [...checks].reverse().find(c => c.required === req);
+        if (prev) { prev.ok = false; prev.remaining = parseFloat(m[5]); }
+      } else if (m[6] !== undefined) mismatches.push({ t });
+      else if (m[7] !== undefined) readings.push({ t, lengthM: parseFloat(m[7]), remainingMm: parseFloat(m[8]),
+        filmType: parseInt(m[9], 10), usedMm: parseFloat(m[10]), sn: m[11] });
+    }
+  }
+  for (const lst of [checks, mismatches, readings]) lst.sort((a, b) => (a.t != null ? a.t : 0) - (b.t != null ? b.t : 0));
+  readings = readings.filter((r, i) => i === 0 || ['lengthM', 'remainingMm', 'filmType', 'usedMm'].some(k => r[k] !== readings[i - 1][k]));
+
+  // pair Studio's checks with the job feed they followed
+  const jobFeeds = feeds.filter(f => !f.onlyFeed);
+  for (const c of checks) {
+    if (c.t == null) continue;
+    let best = null;
+    for (const f of jobFeeds) {
+      if (f.end == null || c.t - f.end < -30000 || c.t - f.end > ROLL_MATCH_MS) continue;
+      if (best == null || Math.abs(c.t - f.end) < Math.abs(c.t - best.end)) best = f;
+    }
+    if (best != null) best.check = c;
+  }
+  for (const mm of mismatches) {
+    const f = jobFeeds.find(f => f.result === 'mismatch' && mm.t != null && Math.abs(mm.t - f.end) <= ROLL_MATCH_MS);
+    if (f) f.blocked = true;
+  }
+
+  const connections = events.filter(e => (e.kind === 'accessory connected' || e.kind === 'accessory disconnected')
+    && /\bid=roller\b/.test(e.msg) && e.t != null).map(e => ({ t: e.t, connected: e.kind === 'accessory connected' }));
+  const alarms = events.filter(e => e.cat === 'alarm' && e.t != null
+    && /FEED_FILM|ROLLER|roller|laminator/.test((get(e.d, 'name') || '') + ' ' + (get(e.d, 'text') || '')))
+    .map(e => ({ t: e.t, code: get(e.d, 'code'), name: get(e.d, 'name'), text: get(e.d, 'text') }));
+  if (!feeds.length && !connections.length) return null;
+
+  // print jobs that ran on the roll: started within minutes of a successful job feed
+  const rollJobs = [];
+  const starts = jobs.filter(j => j.start).map(j => j.start).sort((a, b) => a - b);
+  for (const j of jobs) {
+    if (j.isTest || !j.start) continue;
+    let f = null;
+    for (const g of jobFeeds) {
+      if (g.result !== 'ok' || g.end == null || j.start - g.end < 0 || j.start - g.end > ROLL_JOB_MS) continue;
+      if (f == null || g.end > f.end) f = g;
+    }
+    if (f == null || starts.some(s => f.end < s && s < j.start)) continue;
+    f.taskId = j.taskId;
+    rollJobs.push({ taskId: j.taskId, feed: feeds.indexOf(f) });
+  }
+
+  const withSn = readings.filter(r => r.sn);
+  return { serial: withSn.length ? withSn[withSn.length - 1].sn : null, feeds, checks, mismatches,
+    readings, connections, alarms, jobs: rollJobs };
+}
+
 /* Which Omni O1 variant this is, from the cartridges on the second head:
    DTG inks = UV/DT, fluorescent / flexible / rigid white = Dual-UV. Mirrors detect_model. */
 function detectModel(tankInfo) {
@@ -1053,7 +1215,7 @@ function attribute(t0, t1, jobs, events) {
   return ['other', null];
 }
 
-const api = { loadSources, analyze, findInputs, _internal: { splitlines, pyRound, num, naiveMs, readTar, mergeDeviceLogs, parseGenpd, parseHeadTimers, parseCartridges, detectInkResets } };
+const api = { loadSources, analyze, findInputs, _internal: { splitlines, pyRound, num, naiveMs, readTar, mergeDeviceLogs, parseGenpd, parseHeadTimers, parseCartridges, detectInkResets, parseRoll, desktopDayOffsets, desktopClock } };
 if (typeof module !== 'undefined' && module.exports) module.exports = api;
 else root.OmniParser = api;
 })(typeof self !== 'undefined' ? self : this);

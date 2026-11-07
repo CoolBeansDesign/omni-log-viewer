@@ -579,6 +579,34 @@ def detect_desktop_offset(desktop_jobs, history):
         return _round_offset(diffs[len(diffs) // 2]), 'auto'
     return None, 'unknown'
 
+
+def desktop_day_offsets(desktop_jobs, history):
+    """The computer's clock offset for each day it created jobs. Daylight saving
+    changes the offset partway through the logs, so a single value is wrong
+    for some days. Returns {'YYYY-MM-DD': offset_ms}."""
+    by_day = {}
+    for j in desktop_jobs:
+        ca = num(history.get(j['taskId'], {}).get('createdAt'))
+        if ca:
+            by_day.setdefault(j['createdLocal'][:10], []).append(naive_ms(j['createdLocal']) - ca)
+    return {d: _round_offset(sorted(v)[len(v) // 2]) for d, v in by_day.items()}
+
+
+def desktop_clock(day_offsets, fallback):
+    """ts (computer's local time) -> UTC ms, using that day's offset, else the
+    nearest day's, else the overall offset."""
+    days = sorted(day_offsets)
+
+    def to_t(ts):
+        d = ts[:10]
+        off = day_offsets.get(d)
+        if off is None and days:
+            off = day_offsets[min(days, key=lambda x: (abs(naive_ms(x + ' 00:00:00.000') - naive_ms(d + ' 00:00:00.000')), x))]
+        if off is None:
+            off = fallback
+        return None if off is None else naive_ms(ts) - off
+    return to_t
+
 # --------------------------------------------------------------------------
 # Main analysis
 # --------------------------------------------------------------------------
@@ -625,12 +653,13 @@ def analyze(sources):
     for m in re.finditer(r'"name":"([^"]+)","remain_ml":[-\d.]+,"serial":"A0000T(\w\w)', ac_text):
         device_names[m.group(2)] = m.group(1)
 
-    desktop_jobs, history = [], {}
+    desktop_jobs, history, desk_texts = [], {}, []
     stats['desktopDropped'] = 0
     for day in sorted(desktop):
         kept = dedupe_desktop_logs(desktop[day])
         stats['desktopDropped'] += len(desktop[day]) - len(kept)
         for label, text in kept:
+            desk_texts.append(text)
             jobs, hist = parse_desktop_main(text, label)
             desktop_jobs += jobs
             for tid, h in hist.items():
@@ -645,6 +674,8 @@ def analyze(sources):
 
     dev_off, dev_off_src = detect_device_offset(record, history)
     desk_off, desk_off_src = detect_desktop_offset(desktop_jobs, history)
+    desk_day_offs = desktop_day_offsets(desktop_jobs, history)
+    desk_t = desktop_clock(desk_day_offs, desk_off)
 
     def dev_t(ts):
         return naive_ms(ts) - dev_off
@@ -785,10 +816,12 @@ def analyze(sources):
     boot_ts = sorted(set(boots))
     cartridges = parse_cartridges(ac_text, ds_text, dev_t)
     ink_resets = detect_ink_resets(ac_text, dbg_text, dev_t, series, cartridges['records'], events)
+    roll = parse_roll(ac_text, desk_texts, dev_t, desk_t, events, jobs)
     return {
         'generated': datetime.now(timezone.utc).isoformat(),
         'deviceOffsetMs': dev_off, 'deviceOffsetSource': dev_off_src,
         'desktopOffsetMs': desk_off, 'desktopOffsetSource': desk_off_src,
+        'desktopDayOffsetsMs': desk_day_offs,
         'firmware': next((e['d'].get('version') for e in events if e['kind'] == 'upgrade completed'), None),
         'tanks': tank_info,
         'model': model,
@@ -804,6 +837,7 @@ def analyze(sources):
         'lineFills': line_fills,
         'cartridges': cartridges,
         'inkResets': ink_resets,
+        'roll': roll,
         'countersSeries': counters_series[::max(1, len(counters_series) // 200)],
         'serviceStarts': len(boot_ts),
         'files': files,
@@ -926,6 +960,150 @@ def detect_ink_resets(ac_text, dbg_text, dev_t, series, records, events):
         matched = t is not None and any(0 <= s['t'] - t <= 10000 for s in sets)
         requests.append({'t': t, 'matched': matched})
     return {'sets': sets, 'requests': requests}
+
+
+ROLL_RX = re.compile(r'^\[(\d{4}-[^\]]+)\] \[-\w-\] \[app_roller_laminator\.cpp:\d+ [^\]]*\] : (.*)$', re.M)
+STUDIO_ROLL_RX = re.compile(
+    r"^\[(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d+)\][^\n]*?(?:"
+    r"'=> checkFilmLengthSufficient', \{ requiredLength: ([\d.]+), rollerLenOffset: ([\d.]+)"
+    r"|'Roller film insufficient', 'Required: ([\d.]+)mm, Remaining: ([\d.]+)mm'"
+    r"|'detectFeedFilm', '(film mismatch)'"
+    r"|'ext\.deviceInfo\.rollerPlugin\.info', \{ filmInfo: \{ filmLength: ([\d.]+), filmRemaining: ([\d.]+), filmType: (\d+), filmUsed: ([\d.]+) \}[^\n]*?sn: '(\w*)')",
+    re.M)
+ROLL_MATCH_MS = 120 * 1000          # Studio's check follows the printer's feed within seconds
+ROLL_JOB_MS = 15 * 60 * 1000        # a job starts within minutes of the feed made for it
+
+
+def parse_roll(ac_text, desk_texts, dev_t, desk_t, events, jobs):
+    """The roll feeder (RollMaterialStand): every film feed the printer made, what
+    it found (a tag read and the roll measured, untagged film checked, or a
+    failure), Studio's film-length checks and its readings of the roll, the
+    feeder's connections and alarms, and which print jobs ran on the roll.
+    Returns None when the logs have no roll feeder activity."""
+    feeds, cur = [], None
+    state = {'material': None, 'onlyFeed': None, 'rollerId': None}
+
+    def close(t):
+        nonlocal cur
+        if cur is not None:
+            if cur['result'] is None:
+                cur['result'] = 'incomplete'
+            if cur['end'] is None:
+                cur['end'] = t
+        cur = None
+
+    for m in ROLL_RX.finditer(ac_text):
+        ts, msg = m.group(1), m.group(2).strip()
+        if not valid_clock(ts):
+            continue
+        t = dev_t(ts)
+        if msg.startswith('set is material: '):
+            state['material'] = msg.endswith('true')
+        elif msg.startswith('set only feed: '):
+            state['onlyFeed'] = msg.endswith('true')
+        elif (x := re.match(r'set film ids: rollerId=(\d+)', msg)):
+            state['rollerId'] = int(x.group(1))
+        elif msg == 'start feed film':
+            close(t)
+            only = bool(state['onlyFeed'])
+            cur = {'t': t, 'end': None, 'onlyFeed': only, 'material': state['material'],
+                   'rollerId': None if only else state['rollerId'], 'path': 'feed' if only else None,
+                   'filmType': None, 'remainingM': None, 'encoderSum': None,
+                   'result': None, 'note': None, 'check': None, 'blocked': False, 'taskId': None}
+            feeds.append(cur)
+            state['rollerId'] = None
+        elif cur is None:
+            continue
+        elif 'transition to identify' in msg:
+            cur['path'] = 'tagged'
+        elif 'transition to pre-verify-unofficial' in msg:
+            cur['path'] = 'untagged'
+        elif (x := re.search(r'(?:roller film identified, type=|official film type=)(\d+)', msg)):
+            cur['filmType'] = int(x.group(1))
+        elif (x := re.search(r'calc-length done: .*?encoder sum\D*(\d+), remaining=(\d+)m', msg)):
+            cur['encoderSum'], cur['remainingM'] = int(x.group(1)), int(x.group(2))
+        elif msg.startswith('verify-unofficial passed'):
+            cur['note'] = msg.split(': ', 1)[-1]
+        elif (x := re.search(r'identify over travel without tag, roller expect (\d+) got (\d+)', msg)):
+            cur['result'], cur['note'] = 'mismatch', f'expected film type {x.group(1)}, read {x.group(2)}'
+            close(t)
+        elif msg.startswith('limit not trigger'):
+            cur['result'], cur['note'] = 'failed', msg
+            close(t)
+        elif msg == 'feed film complete':
+            cur['result'] = 'ok'
+            close(t)
+        elif re.search(r'fail|error', msg, re.I):
+            cur['note'] = msg
+    close(cur['t'] if cur else None)
+
+    # Studio: length checks, tag mismatches and the roll as Studio last saw it
+    checks, mismatches, readings = [], [], []
+    seen = set()
+    for text in desk_texts:
+        for m in STUDIO_ROLL_RX.finditer(text):
+            t = desk_t(m.group(1))
+            key = (m.group(1), m.group(0)[-60:])
+            if key in seen:
+                continue
+            seen.add(key)
+            if m.group(2):
+                checks.append({'t': t, 'required': float(m.group(2)), 'offset': float(m.group(3)),
+                               'ok': True, 'remaining': None})
+            elif m.group(4):
+                prev = next((c for c in reversed(checks) if c['required'] == float(m.group(4))), None)
+                if prev:
+                    prev['ok'], prev['remaining'] = False, float(m.group(5))
+            elif m.group(6):
+                mismatches.append({'t': t})
+            elif m.group(7):
+                readings.append({'t': t, 'lengthM': float(m.group(7)), 'remainingMm': float(m.group(8)),
+                                 'filmType': int(m.group(9)), 'usedMm': float(m.group(10)), 'sn': m.group(11)})
+    for lst in (checks, mismatches, readings):
+        lst.sort(key=lambda r: r['t'] if r['t'] is not None else 0)
+    readings = [r for i, r in enumerate(readings)
+                if i == 0 or any(r[k] != readings[i - 1][k] for k in ('lengthM', 'remainingMm', 'filmType', 'usedMm'))]
+
+    # pair Studio's checks with the job feed they followed
+    job_feeds = [f for f in feeds if not f['onlyFeed']]
+    for c in checks:
+        if c['t'] is None:
+            continue
+        f = min((f for f in job_feeds if f['end'] is not None and -30000 <= c['t'] - f['end'] <= ROLL_MATCH_MS),
+                key=lambda f: abs(c['t'] - f['end']), default=None)
+        if f is not None:
+            f['check'] = c
+    for mm in mismatches:
+        f = next((f for f in job_feeds if f['result'] == 'mismatch' and mm['t'] is not None
+                  and abs(mm['t'] - f['end']) <= ROLL_MATCH_MS), None)
+        if f is not None:
+            f['blocked'] = True
+
+    connections = [{'t': e['t'], 'connected': e['kind'] == 'accessory connected'}
+                   for e in events if e['kind'] in ('accessory connected', 'accessory disconnected')
+                   and re.search(r'\bid=roller\b', e['msg']) and e['t'] is not None]
+    alarms = [{'t': e['t'], 'code': e['d'].get('code'), 'name': e['d'].get('name'), 'text': e['d'].get('text')}
+              for e in events if e['cat'] == 'alarm' and e['t'] is not None
+              and re.search(r'FEED_FILM|ROLLER|roller|laminator', (e['d'].get('name') or '') + ' ' + (e['d'].get('text') or ''))]
+    if not feeds and not connections:
+        return None
+
+    # print jobs that ran on the roll: started within minutes of a successful job feed
+    roll_jobs = []
+    starts = sorted(j['start'] for j in jobs if j.get('start'))
+    for j in jobs:
+        if j['isTest'] or not j.get('start'):
+            continue
+        f = max((f for f in job_feeds if f['result'] == 'ok' and f['end'] is not None
+                 and 0 <= j['start'] - f['end'] <= ROLL_JOB_MS), key=lambda f: f['end'], default=None)
+        if f is None or any(f['end'] < s < j['start'] for s in starts):
+            continue
+        f['taskId'] = j['taskId']
+        roll_jobs.append({'taskId': j['taskId'], 'feed': feeds.index(f)})
+
+    sn = next((r['sn'] for r in reversed(readings) if r['sn']), None)
+    return {'serial': sn, 'feeds': feeds, 'checks': checks, 'mismatches': mismatches,
+            'readings': readings, 'connections': connections, 'alarms': alarms, 'jobs': roll_jobs}
 
 
 def detect_model(tank_info):
